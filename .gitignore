@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.DS_Store
+.Rhistory
+.env
+.env.*
+.venv/
+.cache/
+node_modules/
+cloudflare/node_modules/
+cloudflare/.wrangler/
+cloudflare/data/seed.sql
+cloudflare/data/*.duckdb
+data/*.db
+data/*.json
+data/*.db-shm
+data/*.db-wal

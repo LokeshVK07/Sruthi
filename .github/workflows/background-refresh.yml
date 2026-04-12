@@ -1,0 +1,159 @@
+name: Background Refresh
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: sruthi-background-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      SRUTHI_UPDATE_COMMAND: ${{ vars.SRUTHI_UPDATE_COMMAND }}
+      SRUTHI_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_ACTIVE_D1_SLOT }}
+      SRUTHI_D1_DB_A_ID: ${{ vars.SRUTHI_D1_DB_A_ID }}
+      SRUTHI_D1_DB_A_NAME: ${{ vars.SRUTHI_D1_DB_A_NAME }}
+      SRUTHI_D1_DB_B_ID: ${{ vars.SRUTHI_D1_DB_B_ID }}
+      SRUTHI_D1_DB_B_NAME: ${{ vars.SRUTHI_D1_DB_B_NAME }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install workflow dependencies
+        run: |
+          python -m pip install --upgrade pip duckdb
+          npm install -g wrangler
+
+      - name: Select inactive D1 slot
+        run: |
+          active="${SRUTHI_ACTIVE_D1_SLOT:-A}"
+          if [ "$active" = "A" ]; then
+            target="B"
+            db_id="${SRUTHI_D1_DB_B_ID}"
+            db_name="${SRUTHI_D1_DB_B_NAME}"
+          else
+            target="A"
+            db_id="${SRUTHI_D1_DB_A_ID}"
+            db_name="${SRUTHI_D1_DB_A_NAME}"
+          fi
+          test -n "$db_id"
+          test -n "$db_name"
+          echo "TARGET_DB_ID=$db_id" >> "$GITHUB_ENV"
+          echo "TARGET_DB_NAME=$db_name" >> "$GITHUB_ENV"
+          echo "TARGET_SLOT=$target" >> "$GITHUB_ENV"
+
+      - name: Render temporary Wrangler config
+        run: |
+          python cloudflare/scripts/render_wrangler_config.py \
+            --input cloudflare/wrangler.jsonc \
+            --output "$RUNNER_TEMP/wrangler.deploy.jsonc" \
+            --database-id "$TARGET_DB_ID" \
+            --database-name "$TARGET_DB_NAME"
+
+      - name: Run existing update hook
+        if: ${{ env.SRUTHI_UPDATE_COMMAND != '' }}
+        run: |
+          bash -lc "$SRUTHI_UPDATE_COMMAND"
+
+      - name: Validate catalog and build release seed
+        run: |
+          python cloudflare/scripts/prepare_release.py \
+            --db data/sruthi.db \
+            --seed cloudflare/data/seed.sql \
+            --baseline cloudflare/data/release-baseline.json \
+            --manifest "$RUNNER_TEMP/release-manifest.json" \
+            --duckdb-path "$RUNNER_TEMP/release-check.duckdb"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sruthi-release
+          path: |
+            cloudflare/data/seed.sql
+            ${{ runner.temp }}/release-manifest.json
+
+      - name: Import release into inactive D1 slot
+        run: |
+          npx wrangler d1 execute "$TARGET_DB_NAME" \
+            --remote \
+            --file ./cloudflare/data/seed.sql \
+            --config "$RUNNER_TEMP/wrangler.deploy.jsonc"
+
+      - name: Validate inactive D1 slot
+        run: |
+          npx wrangler d1 execute "$TARGET_DB_NAME" \
+            --remote \
+            --command "SELECT COUNT(*) AS count FROM albums;" \
+            --config "$RUNNER_TEMP/wrangler.deploy.jsonc" \
+            --json > "$RUNNER_TEMP/albums.json"
+          npx wrangler d1 execute "$TARGET_DB_NAME" \
+            --remote \
+            --command "SELECT COUNT(*) AS count FROM songs;" \
+            --config "$RUNNER_TEMP/wrangler.deploy.jsonc" \
+            --json > "$RUNNER_TEMP/songs.json"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          def extract_count(path):
+            payload = json.loads(Path(path).read_text())
+            stack = [payload]
+            while stack:
+              item = stack.pop()
+              if isinstance(item, dict):
+                if "count" in item:
+                  return int(item["count"])
+                stack.extend(item.values())
+              elif isinstance(item, list):
+                stack.extend(item)
+            raise SystemExit(f"No count field found in {path}")
+
+          runner_temp = Path(os.environ["RUNNER_TEMP"])
+          album_count = extract_count(runner_temp / "albums.json")
+          song_count = extract_count(runner_temp / "songs.json")
+          if album_count <= 0 or song_count <= 0:
+            raise SystemExit(f"Remote D1 validation failed: albums={album_count}, songs={song_count}")
+          print({"albumCount": album_count, "songCount": song_count})
+          PY
+
+      - name: Deploy Worker after successful import and validation
+        run: |
+          npx wrangler deploy --config "$RUNNER_TEMP/wrangler.deploy.jsonc"
+
+      - name: Mark deployed D1 slot as active
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" >/dev/null 2>&1; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" \
+              -f name=SRUTHI_ACTIVE_D1_SLOT \
+              -f value="$TARGET_SLOT"
+          else
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/actions/variables" \
+              -f name=SRUTHI_ACTIVE_D1_SLOT \
+              -f value="$TARGET_SLOT"
+          fi

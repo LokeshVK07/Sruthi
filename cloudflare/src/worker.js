@@ -1,0 +1,1313 @@
+const SITE_ORIGIN = "https://www.masstamilan.dev";
+const DEFAULT_SYNC_PATH = "/sruthi-sync.json";
+
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    if (url.pathname.startsWith("/api/")) {
+      return handleApi(request, env, url, ctx);
+    }
+
+    const assetResponse = await env.ASSETS.fetch(request);
+    if (assetResponse.status !== 404) return assetResponse;
+
+    if (!url.pathname.includes(".")) {
+      return env.ASSETS.fetch(new Request(new URL("/index.html", url), request));
+    }
+
+    return assetResponse;
+  },
+
+  async scheduled(_controller, env, ctx) {
+    ctx.waitUntil(runScheduledSync(env));
+  },
+};
+
+async function handleApi(request, env, url, ctx) {
+  if (!env.DB) {
+    return json({ error: "D1 binding `DB` is not configured." }, 500);
+  }
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: corsHeaders(),
+    });
+  }
+
+  if (url.pathname === "/api/app-state") {
+    const [albumCountRow, trackCountRow, updatedRow, decadeRows] = await Promise.all([
+      env.DB.prepare("SELECT COUNT(*) AS count FROM albums").first(),
+      env.DB.prepare("SELECT COUNT(*) AS count FROM songs").first(),
+      env.DB.prepare("SELECT MAX(updated_at) AS updatedAt FROM songs").first(),
+      env.DB.prepare(
+        `
+        SELECT DISTINCT ((year / 10) * 10) AS decade
+        FROM songs
+        WHERE year > 0
+        ORDER BY decade ASC
+        `,
+      ).all(),
+    ]);
+
+    const decades = (decadeRows.results || []).map((row) => `${row.decade}s`);
+    return json({
+      summary: {
+        albumCount: Number(albumCountRow?.count || 0),
+        trackCount: Number(trackCountRow?.count || 0),
+      },
+      filters: {
+        decades,
+        moods: ["Imported"],
+      },
+      updatedAt: updatedRow?.updatedAt || null,
+      refreshWorkerActive: false,
+      refreshWorkerSeenAt: null,
+      features: {
+        localLibrary: false,
+        hostedDirectAudio: true,
+      },
+    });
+  }
+
+  if (url.pathname === "/api/library") {
+    const query = cleanText(url.searchParams.get("query")).toLowerCase();
+    const decade = cleanText(url.searchParams.get("decade")) || "all";
+    const offset = toInt(url.searchParams.get("offset"), 0);
+    const limit = Math.min(toInt(url.searchParams.get("limit"), 80), 120);
+    const localSongs = (url.searchParams.get("localSongs") || "false").toLowerCase() === "true";
+
+    if (localSongs) {
+      return json({
+        songs: [],
+        total: 0,
+        offset,
+        limit,
+        hasMore: false,
+      });
+    }
+
+    const bindings = [];
+    const filters = [
+      "lower(title) NOT LIKE '%verifying you are human%'",
+      "lower(title) NOT LIKE '%verification successful%'",
+      "lower(movie) NOT LIKE '%www.masstamilan.dev%'",
+    ];
+
+    if (decade !== "all") {
+      const decadeStart = toInt(decade, 0);
+      if (decadeStart > 0) {
+        filters.push("year >= ? AND year < ?");
+        bindings.push(decadeStart, decadeStart + 10);
+      }
+    }
+
+    if (query) {
+      filters.push("(lower(title) LIKE ? OR lower(movie) LIKE ? OR lower(artist) LIKE ? OR lower(composer) LIKE ?)");
+      const like = `%${query}%`;
+      bindings.push(like, like, like, like);
+    }
+
+    const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+    const rankSql = query
+      ? `
+        CASE
+          WHEN lower(title) = ? THEN 0
+          WHEN lower(title) LIKE ? THEN 1
+          WHEN lower(movie) = ? THEN 2
+          WHEN lower(movie) LIKE ? THEN 3
+          WHEN lower(artist) = ? OR lower(artist) LIKE ? THEN 4
+          WHEN lower(composer) = ? OR lower(composer) LIKE ? THEN 5
+          WHEN instr(lower(title), ?) > 0 THEN 6
+          WHEN instr(lower(movie), ?) > 0 THEN 7
+          WHEN instr(lower(artist), ?) > 0 THEN 8
+          WHEN instr(lower(composer), ?) > 0 THEN 9
+          ELSE 10
+        END
+      `
+      : "10";
+
+    const countStmt = env.DB.prepare(`SELECT COUNT(*) AS count FROM songs ${whereClause}`).bind(...bindings);
+    const rankBindings = query
+      ? [query, `${query}%`, query, `${query}%`, query, `${query}%`, query, `${query}%`, query, query, query, query]
+      : [];
+    const rowsStmt = env.DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      ${whereClause}
+      ORDER BY ${rankSql}, year DESC, lower(title) ASC
+      LIMIT ? OFFSET ?
+      `,
+    ).bind(...bindings, ...rankBindings, limit, offset);
+
+    const [countRow, rows] = await Promise.all([countStmt.first(), rowsStmt.all()]);
+    const songs = (rows.results || []).map((row) => rowToSong(row));
+    return json({
+      songs,
+      total: Number(countRow?.count || 0),
+      offset,
+      limit,
+      hasMore: offset + limit < Number(countRow?.count || 0),
+    });
+  }
+
+  if (url.pathname === "/api/song") {
+    const songId = cleanText(url.searchParams.get("id"));
+    const row = await env.DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      WHERE id = ?
+      `,
+    ).bind(songId).first();
+
+    if (!row) return json({ error: "Song not found." }, 404);
+    return json(rowToSong(row));
+  }
+
+  if (url.pathname === "/api/songs-batch" && request.method === "POST") {
+    const payload = await request.json().catch(() => ({}));
+    const ids = Array.isArray(payload?.ids) ? [...new Set(payload.ids.map(cleanText).filter(Boolean))].slice(0, 1200) : [];
+    if (!ids.length) return json({ songs: [] });
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = await env.DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      WHERE id IN (${placeholders})
+      `,
+    ).bind(...ids).all();
+    const byId = new Map((rows.results || []).map((row) => [cleanText(row.id), rowToSong(row)]));
+    return json({ songs: ids.map((id) => byId.get(id)).filter(Boolean) });
+  }
+
+  if (url.pathname === "/api/cache/status") {
+    return json({ cachedCount: 0, inFlight: 0, refreshingAlbums: 0 });
+  }
+
+  if (url.pathname === "/api/playlists") {
+    await ensureOfficialPlaylistTables(env);
+    const playlists = await listOfficialPlaylists(env, { includeSongIds: false });
+    return json({ playlists });
+  }
+
+  if (url.pathname === "/api/playlist") {
+    await ensureOfficialPlaylistTables(env);
+    const playlistId = cleanText(url.searchParams.get("id"));
+    if (!playlistId) return json({ error: "Playlist id is required." }, 400);
+    const playlist = await loadOfficialPlaylistDetail(env, playlistId);
+    if (!playlist) return json({ error: "Playlist not found." }, 404);
+    return json(playlist);
+  }
+
+  if (url.pathname === "/api/sync/status") {
+    await ensureSyncTables(env);
+    const row = await env.DB.prepare(
+      `
+      SELECT status, started_at, finished_at, albums_seen, songs_seen, message
+      FROM sync_runs
+      ORDER BY id DESC
+      LIMIT 1
+      `,
+    ).first();
+    return json({
+      syncEnabled: Boolean(env.SYNC_FEED_URL || env.MASSTAMILAN_SYNC_FEED_URL),
+      feedUrl: env.SYNC_FEED_URL || env.MASSTAMILAN_SYNC_FEED_URL || DEFAULT_SYNC_PATH,
+      lastRun: row || null,
+    });
+  }
+
+  if (url.pathname === "/api/admin/sync" && request.method === "POST") {
+    const configuredToken = cleanText(env.SYNC_ADMIN_TOKEN);
+    const suppliedToken = cleanText(request.headers.get("x-sync-token")) || cleanText(url.searchParams.get("token"));
+    if (configuredToken && suppliedToken !== configuredToken) {
+      return json({ error: "Unauthorized." }, 401);
+    }
+    const result = await runScheduledSync(env);
+    return json(result, result.ok ? 200 : 500);
+  }
+
+  if (url.pathname === "/api/admin/import-playlists" && request.method === "POST") {
+    const configuredToken = cleanText(env.SYNC_ADMIN_TOKEN);
+    const suppliedToken = cleanText(request.headers.get("x-sync-token")) || cleanText(url.searchParams.get("token"));
+    if (configuredToken && suppliedToken !== configuredToken) {
+      return json({ error: "Unauthorized." }, 401);
+    }
+    const payload = await request.json().catch(() => ({}));
+    const playlists = normalizeSyncPlaylists(payload);
+    await ensureOfficialPlaylistTables(env);
+    for (const playlist of playlists) {
+      await upsertOfficialPlaylist(env, playlist);
+    }
+    return json({ ok: true, imported: playlists.length });
+  }
+
+  if (url.pathname === "/api/warmup") {
+    const payload = await request.json().catch(() => ({}));
+    const limit = Math.min(Math.max(Number(payload?.limit || 6), 1), 8);
+    const rows = await env.DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      ORDER BY year DESC, lower(title) ASC
+      LIMIT ?
+      `,
+    ).bind(limit).all();
+    ctx?.waitUntil(warmSongs(env, url.origin, rows.results || []));
+    return json({ ok: true, queued: (rows.results || []).length });
+  }
+
+  if (url.pathname === "/api/prefetch") {
+    const payload = await request.json().catch(() => ({}));
+    const ids = Array.isArray(payload?.ids) ? [...new Set(payload.ids.map(cleanText).filter(Boolean))].slice(0, 6) : [];
+    if (!ids.length) return json({ ok: true, queued: 0 });
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = await env.DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      WHERE id IN (${placeholders})
+      `,
+    ).bind(...ids).all();
+    ctx?.waitUntil(warmSongs(env, url.origin, rows.results || []));
+    return json({ ok: true, queued: (rows.results || []).length });
+  }
+
+  if (url.pathname === "/api/prefetch/album") {
+    const payload = await request.json().catch(() => ({}));
+    const songId = cleanText(payload?.songId);
+    const limit = Math.min(Math.max(Number(payload?.limit || 4), 1), 8);
+    if (!songId) return json({ ok: true, queued: 0 });
+    const current = await env.DB.prepare("SELECT album_url FROM songs WHERE id = ?").bind(songId).first();
+    if (!current?.album_url) return json({ ok: true, queued: 0 });
+    const rows = await env.DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      WHERE album_url = ?
+      ORDER BY lower(title) ASC
+      LIMIT ?
+      `,
+    ).bind(current.album_url, limit).all();
+    ctx?.waitUntil(warmSongs(env, url.origin, rows.results || []));
+    return json({ ok: true, queued: (rows.results || []).length });
+  }
+
+  if (url.pathname.startsWith("/api/stream/")) {
+    const songId = cleanText(url.pathname.split("/").pop());
+    return handleStream(songId, request, env, ctx);
+  }
+
+  return json({ error: "Not found." }, 404);
+}
+
+async function handleStream(songId, request, env, ctx) {
+  const range = request.headers.get("Range");
+  if (!range) {
+    const cached = await caches.default.match(request);
+    if (cached) return withCors(cached);
+  }
+
+  let row = await env.DB.prepare(
+    `
+    SELECT id, album_url, title, artist, composer, movie, year, mood,
+           song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+           remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+    FROM songs
+    WHERE id = ?
+    `,
+  ).bind(songId).first();
+
+  if (!row) return json({ error: "Song not found." }, 404);
+
+  let response = await tryAudioCandidates(row, request);
+  if (response && !range) {
+    ctx?.waitUntil(caches.default.put(request, response.clone()));
+  }
+  if (response) return response;
+
+  const refreshed = await tryRefreshSongLink(env, row);
+  if (refreshed) {
+    row = refreshed;
+    response = await tryAudioCandidates(row, request);
+    if (response && !range) {
+      ctx?.waitUntil(caches.default.put(request, response.clone()));
+    }
+    if (response) return response;
+  }
+
+  return json({ error: "Upstream stream unavailable." }, 502);
+}
+
+async function tryAudioCandidates(row, request) {
+  const range = request.headers.get("Range");
+  for (const candidate of [row.audio_128_url, row.audio_320_url]) {
+    const target = absoluteUrl(candidate);
+    if (!target) continue;
+    const upstream = await fetchAudio(target, row.album_url, range);
+    if (upstream) return upstream;
+  }
+  return null;
+}
+
+async function fetchAudio(target, albumUrl, rangeHeader) {
+  const headers = new Headers({
+    Accept: "audio/mpeg,audio/*;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    Referer: cleanText(albumUrl) || SITE_ORIGIN,
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  });
+  if (rangeHeader) headers.set("Range", rangeHeader);
+
+  const response = await fetch(target, {
+    method: "GET",
+    headers,
+    redirect: "follow",
+  });
+
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  if (!response.ok) return null;
+  if (contentType.includes("text/html") || contentType.includes("text/plain")) return null;
+
+  const outHeaders = new Headers(corsHeaders());
+  outHeaders.set("Content-Type", response.headers.get("content-type") || "audio/mpeg");
+  if (response.headers.get("content-length")) outHeaders.set("Content-Length", response.headers.get("content-length"));
+  if (response.headers.get("content-range")) outHeaders.set("Content-Range", response.headers.get("content-range"));
+  outHeaders.set("Accept-Ranges", response.headers.get("accept-ranges") || "bytes");
+  if (!rangeHeader) outHeaders.set("Cache-Control", "public, max-age=3600");
+  return new Response(response.body, {
+    status: response.status,
+    headers: outHeaders,
+  });
+}
+
+async function tryRefreshSongLink(env, row) {
+  const candidatePages = unique([row.album_url, row.song_page_url, row.source_url].map(cleanText).filter(Boolean));
+  for (const candidate of candidatePages) {
+    const pageHtml = await fetchText(candidate);
+    if (!pageHtml) continue;
+    let albumUrl = cleanText(row.album_url);
+    let albumHtml = pageHtml;
+    if (!pageHtml.includes("window.albumTracks")) {
+      const albumLinks = extractAlbumLinks(pageHtml);
+      if (!albumLinks.length) continue;
+      albumUrl = albumLinks[0];
+      albumHtml = await fetchText(albumUrl);
+      if (!albumHtml || !albumHtml.includes("window.albumTracks")) continue;
+    }
+
+    const refreshed = await refreshAlbum(env, albumUrl, albumHtml);
+    if (!refreshed) continue;
+    return env.DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      WHERE id = ?
+      `,
+    ).bind(row.id).first();
+  }
+  return null;
+}
+
+async function runScheduledSync(env) {
+  if (!env.DB) {
+    return { ok: false, error: "D1 binding `DB` is not configured." };
+  }
+
+  const feedUrl = cleanText(env.SYNC_FEED_URL || env.MASSTAMILAN_SYNC_FEED_URL || "");
+  if (!feedUrl) {
+    return { ok: false, error: "SYNC_FEED_URL is not configured." };
+  }
+
+  await ensureSyncTables(env);
+  const startedAt = nowIso();
+  const runId = await insertSyncRun(env, startedAt);
+
+  try {
+    const payload = await fetchSyncFeed(feedUrl);
+    const albums = normalizeSyncPayload(payload);
+    const playlists = normalizeSyncPlaylists(payload);
+    let songsSeen = 0;
+    for (const album of albums) {
+      songsSeen += album.songs.length;
+    }
+
+    for (const album of albums) {
+      await upsertAlbum(env, album);
+      for (const song of album.songs) {
+        await upsertSong(env, song);
+      }
+    }
+
+    await ensureOfficialPlaylistTables(env);
+    for (const playlist of playlists) {
+      await upsertOfficialPlaylist(env, playlist);
+    }
+
+    const finishedAt = nowIso();
+    await env.DB.batch([
+      env.DB.prepare(
+        `
+        UPDATE sync_runs
+        SET status = 'success',
+            finished_at = ?,
+            albums_seen = ?,
+            songs_seen = ?,
+            message = ?
+        WHERE id = ?
+        `,
+      ).bind(finishedAt, albums.length, songsSeen, "Sync completed", runId),
+      env.DB.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('last_sync_at', ?)").bind(finishedAt),
+    ]);
+    return { ok: true, albumsSeen: albums.length, songsSeen, playlistsSeen: playlists.length };
+  } catch (error) {
+    const finishedAt = nowIso();
+    const message = cleanText(error?.message || "Sync failed");
+    await env.DB.prepare(
+      `
+      UPDATE sync_runs
+      SET status = 'failed',
+          finished_at = ?,
+          message = ?
+      WHERE id = ?
+      `,
+    ).bind(finishedAt, message, runId).run();
+    return { ok: false, error: message };
+  }
+}
+
+async function ensureSyncTables(env) {
+  await env.DB.batch([
+    env.DB.prepare(
+      `
+      CREATE TABLE IF NOT EXISTS sync_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        albums_seen INTEGER NOT NULL DEFAULT 0,
+        songs_seen INTEGER NOT NULL DEFAULT 0,
+        message TEXT
+      )
+      `,
+    ),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_sync_runs_started_at ON sync_runs(started_at DESC)"),
+  ]);
+}
+
+async function ensureOfficialPlaylistTables(env) {
+  await env.DB.batch([
+    env.DB.prepare(
+      `
+      CREATE TABLE IF NOT EXISTS official_playlists (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        source_url TEXT,
+        updated_at TEXT NOT NULL,
+        song_count INTEGER NOT NULL DEFAULT 0
+      )
+      `,
+    ),
+    env.DB.prepare(
+      `
+      CREATE TABLE IF NOT EXISTS official_playlist_songs (
+        playlist_id TEXT NOT NULL,
+        song_id TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playlist_id, song_id)
+      )
+      `,
+    ),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_official_playlist_songs_playlist ON official_playlist_songs(playlist_id, position)"),
+  ]);
+}
+
+async function insertSyncRun(env, startedAt) {
+  const result = await env.DB.prepare(
+    `
+    INSERT INTO sync_runs (status, started_at, finished_at, albums_seen, songs_seen, message)
+    VALUES ('running', ?, NULL, 0, 0, 'Sync started')
+    `,
+  ).bind(startedAt).run();
+  return Number(result.meta?.last_row_id || 0);
+}
+
+async function fetchSyncFeed(feedUrl) {
+  const response = await fetch(feedUrl, {
+    headers: {
+      Accept: "application/json",
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    },
+  });
+  if (!response.ok) {
+    throw new Error(`Feed request failed with ${response.status}`);
+  }
+  const payload = await response.json();
+  return payload;
+}
+
+function normalizeSyncPayload(payload) {
+  const albums = Array.isArray(payload?.albums) ? payload.albums : [];
+  return albums
+    .map((album) => normalizeAlbum(album))
+    .filter((album) => album.url && album.title);
+}
+
+function normalizeSyncPlaylists(payload) {
+  const playlists = Array.isArray(payload?.playlists) ? payload.playlists : [];
+  return playlists
+    .map((playlist) => normalizePlaylist(playlist))
+    .filter((playlist) => playlist.id && playlist.name);
+}
+
+function normalizeAlbum(album) {
+  const url = cleanText(album?.url || album?.albumUrl || album?.sourceUrl);
+  const title = cleanText(album?.title || album?.movie || "");
+  const year = inferYearFromValues([
+    album?.year,
+    url,
+    title,
+    album?.imageUrl,
+  ]);
+  const songs = Array.isArray(album?.songs || album?.tracks) ? (album.songs || album.tracks).map((song, index) => normalizeSong(song, album, index)).filter((item) => item.id) : [];
+  return {
+    url,
+    title,
+    pageNumber: toInt(album?.pageNumber, 0),
+    year,
+    musicDirector: cleanText(album?.musicDirector || album?.composer),
+    director: cleanText(album?.director),
+    starring: cleanText(album?.starring),
+    lyricists: cleanText(album?.lyricists),
+    zipLinksJson: JSON.stringify(Array.isArray(album?.zipLinks) ? album.zipLinks : []),
+    trackCount: songs.length,
+    updatedAt: cleanText(album?.updatedAt) || nowIso(),
+    songs,
+  };
+}
+
+function normalizeSong(song, album, index) {
+  const albumUrl = cleanText(album?.url || album?.albumUrl || album?.sourceUrl);
+  const title = cleanText(song?.title || song?.name);
+  const id = cleanText(song?.id) || stableSongId(albumUrl, title, index + 1);
+  const year = inferYearFromValues([
+    song?.year,
+    album?.year,
+    song?.movie,
+    album?.title,
+    albumUrl,
+    song?.imageUrl,
+  ]);
+  const audio128 = absoluteUrl(song?.audio128Url || song?.audio_128_url || song?.audioUrl || song?.audio_url || song?.url128);
+  const audio320 = absoluteUrl(song?.audio320Url || song?.audio_320_url || song?.audioUrl || song?.audio_url || song?.url320);
+  const pageUrl = absoluteUrl(song?.songPageUrl || song?.song_page_url || song?.pageUrl || song?.sourceUrl);
+  return {
+    id,
+    albumUrl,
+    title,
+    artist: cleanText(song?.artist || song?.singers),
+    singers: cleanText(song?.singers || song?.artist),
+    composer: cleanText(song?.composer || album?.musicDirector || album?.composer),
+    movie: cleanText(song?.movie || album?.title),
+    year,
+    mood: cleanText(song?.mood) || "Imported",
+    songPageUrl: pageUrl,
+    sourceUrl: absoluteUrl(song?.sourceUrl || pageUrl || albumUrl),
+    imageUrl: absoluteUrl(song?.imageUrl || album?.imageUrl),
+    audioUrl: audio128 || audio320,
+    audio128Url: audio128,
+    audio320Url: audio320,
+    remoteAudio128Url: absoluteUrl(song?.remoteAudio128Url || song?.remote_audio_128_url),
+    remoteAudio320Url: absoluteUrl(song?.remoteAudio320Url || song?.remote_audio_320_url),
+    localAudio128Url: cleanText(song?.localAudio128Url || song?.local_audio_128_url),
+    localAudio320Url: cleanText(song?.localAudio320Url || song?.local_audio_320_url),
+    downloadLinksJson: JSON.stringify(Array.isArray(song?.downloadLinks) ? song.downloadLinks : []),
+    spotifyJson: JSON.stringify(song?.spotify || song?.spotifyJson || {}),
+    lastRefreshedAt: cleanText(song?.lastRefreshedAt || song?.last_refreshed_at || album?.updatedAt),
+    linkStatus: cleanText(song?.linkStatus || song?.link_status) || "fresh",
+    updatedAt: cleanText(song?.updatedAt || album?.updatedAt) || nowIso(),
+  };
+}
+
+function normalizePlaylist(playlist) {
+  const songRefs = Array.isArray(playlist?.songIds || playlist?.songs)
+    ? (playlist.songIds || playlist.songs)
+        .map((item) => {
+          if (typeof item === "string") return { id: cleanText(item) };
+          return {
+            id: cleanText(item?.id || item?.songId),
+            sourceUrl: absoluteUrl(item?.sourceUrl || item?.url),
+            songPageUrl: absoluteUrl(item?.songPageUrl || item?.song_page_url),
+            title: cleanText(item?.title || item?.name),
+            movie: cleanText(item?.movie || item?.album),
+          };
+        })
+        .filter((item) => item.id || item.sourceUrl || item.songPageUrl || item.title)
+    : [];
+  return {
+    id: cleanText(playlist?.id) || slugValue(playlist?.name),
+    name: cleanText(playlist?.name || playlist?.title),
+    sourceUrl: absoluteUrl(playlist?.sourceUrl || playlist?.url),
+    updatedAt: cleanText(playlist?.updatedAt) || nowIso(),
+    songRefs,
+  };
+}
+
+async function upsertAlbum(env, album) {
+  await env.DB.prepare(
+    `
+    INSERT INTO albums (
+      url, title, page_number, year, music_director, director, starring,
+      lyricists, zip_links_json, track_count, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(url) DO UPDATE SET
+      title = excluded.title,
+      page_number = excluded.page_number,
+      year = excluded.year,
+      music_director = excluded.music_director,
+      director = excluded.director,
+      starring = excluded.starring,
+      lyricists = excluded.lyricists,
+      zip_links_json = excluded.zip_links_json,
+      track_count = excluded.track_count,
+      updated_at = excluded.updated_at
+    `,
+  ).bind(
+    album.url,
+    album.title,
+    album.pageNumber,
+    album.year,
+    album.musicDirector,
+    album.director,
+    album.starring,
+    album.lyricists,
+    album.zipLinksJson,
+    album.trackCount,
+    album.updatedAt,
+  ).run();
+}
+
+async function upsertSong(env, song) {
+  await env.DB.prepare(
+    `
+    INSERT INTO songs (
+      id, album_url, title, artist, singers, composer, movie, year, mood,
+      song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+      remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
+      download_links_json, spotify_json, last_refreshed_at, link_status, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      album_url = excluded.album_url,
+      title = excluded.title,
+      artist = excluded.artist,
+      singers = excluded.singers,
+      composer = excluded.composer,
+      movie = excluded.movie,
+      year = excluded.year,
+      mood = excluded.mood,
+      song_page_url = excluded.song_page_url,
+      source_url = excluded.source_url,
+      image_url = excluded.image_url,
+      audio_url = excluded.audio_url,
+      audio_128_url = excluded.audio_128_url,
+      audio_320_url = excluded.audio_320_url,
+      remote_audio_128_url = excluded.remote_audio_128_url,
+      remote_audio_320_url = excluded.remote_audio_320_url,
+      local_audio_128_url = excluded.local_audio_128_url,
+      local_audio_320_url = excluded.local_audio_320_url,
+      download_links_json = excluded.download_links_json,
+      spotify_json = excluded.spotify_json,
+      last_refreshed_at = excluded.last_refreshed_at,
+      link_status = excluded.link_status,
+      updated_at = excluded.updated_at
+    `,
+  ).bind(
+    song.id,
+    song.albumUrl,
+    song.title,
+    song.artist,
+    song.singers,
+    song.composer,
+    song.movie,
+    song.year,
+    song.mood,
+    song.songPageUrl,
+    song.sourceUrl,
+    song.imageUrl,
+    song.audioUrl,
+    song.audio128Url,
+    song.audio320Url,
+    song.remoteAudio128Url,
+    song.remoteAudio320Url,
+    song.localAudio128Url,
+    song.localAudio320Url,
+    song.downloadLinksJson,
+    song.spotifyJson,
+    song.lastRefreshedAt,
+    song.linkStatus,
+    song.updatedAt,
+  ).run();
+}
+
+async function upsertOfficialPlaylist(env, playlist) {
+  const resolvedSongIds = await resolvePlaylistSongIds(env, playlist.songRefs || []);
+  await env.DB.prepare(
+    `
+    INSERT INTO official_playlists (id, name, source_url, updated_at, song_count)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      source_url = excluded.source_url,
+      updated_at = excluded.updated_at,
+      song_count = excluded.song_count
+    `,
+  ).bind(
+    playlist.id,
+    playlist.name,
+    playlist.sourceUrl,
+    playlist.updatedAt,
+    resolvedSongIds.length,
+  ).run();
+
+  await env.DB.prepare("DELETE FROM official_playlist_songs WHERE playlist_id = ?").bind(playlist.id).run();
+  const statements = resolvedSongIds.map((songId, index) =>
+    env.DB.prepare(
+      `
+      INSERT OR REPLACE INTO official_playlist_songs (playlist_id, song_id, position)
+      VALUES (?, ?, ?)
+      `,
+    ).bind(playlist.id, songId, index),
+  );
+  if (statements.length) {
+    await env.DB.batch(statements);
+  }
+}
+
+async function listOfficialPlaylists(env, { includeSongIds = true } = {}) {
+  const rows = await env.DB.prepare(
+    `
+    SELECT id, name, source_url, updated_at, song_count
+    FROM official_playlists
+    ORDER BY lower(name) ASC
+    `,
+  ).all();
+  const results = rows.results || [];
+  const playlists = [];
+  for (const row of results) {
+    let songIds = [];
+    let songCount = Number(row.song_count || 0);
+    if (includeSongIds) {
+      songIds = await officialPlaylistSongIds(env, row.id, cleanText(row.name));
+      songCount = songIds.length;
+    } else if (!songCount) {
+      songCount = (await derivePlaylistSongIdsFromName(env, cleanText(row.name))).length;
+    }
+    playlists.push({
+      id: row.id,
+      name: cleanText(row.name),
+      sourceUrl: cleanText(row.source_url),
+      updatedAt: row.updated_at || null,
+      songIds,
+      songCount,
+      official: true,
+    });
+  }
+  return playlists;
+}
+
+async function officialPlaylistSongIds(env, playlistId, playlistName = "") {
+  const songs = await env.DB.prepare(
+    `
+    SELECT song_id
+    FROM official_playlist_songs
+    WHERE playlist_id = ?
+    ORDER BY position ASC, song_id ASC
+    `,
+  ).bind(playlistId).all();
+  let songIds = (songs.results || []).map((item) => cleanText(item.song_id)).filter(Boolean);
+  if (!songIds.length) {
+    songIds = await derivePlaylistSongIdsFromName(env, cleanText(playlistName));
+  }
+  return songIds;
+}
+
+async function loadOfficialPlaylistDetail(env, playlistId) {
+  const row = await env.DB.prepare(
+    `
+    SELECT id, name, source_url, updated_at, song_count
+    FROM official_playlists
+    WHERE id = ?
+    LIMIT 1
+    `,
+  ).bind(playlistId).first();
+  if (!row) return null;
+
+  const songIds = await officialPlaylistSongIds(env, playlistId, cleanText(row.name));
+  const songs = await loadSongsByIds(env, songIds);
+  return {
+    id: row.id,
+    name: cleanText(row.name),
+    sourceUrl: cleanText(row.source_url),
+    updatedAt: row.updated_at || null,
+    songCount: songIds.length,
+    songIds: songs.map((song) => song.id),
+    songs,
+    official: true,
+  };
+}
+
+async function loadSongsByIds(env, ids) {
+  const uniqueIds = [...new Set((ids || []).map(cleanText).filter(Boolean))];
+  if (!uniqueIds.length) return [];
+  const chunkSize = 90;
+  const rows = [];
+  for (let offset = 0; offset < uniqueIds.length; offset += chunkSize) {
+    const chunk = uniqueIds.slice(offset, offset + chunkSize);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const result = await env.DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      WHERE id IN (${placeholders})
+      `,
+    ).bind(...chunk).all();
+    rows.push(...(result.results || []));
+  }
+  const byId = new Map(rows.map((item) => [cleanText(item.id), rowToSong(item)]));
+  return uniqueIds.map((id) => byId.get(id)).filter(Boolean);
+}
+
+async function derivePlaylistSongIdsFromName(env, playlistName) {
+  const normalized = cleanText(playlistName).toLowerCase();
+  const aliases = playlistComposerAliases(normalized);
+  if (!aliases.length && normalized.includes("bgm")) {
+    const bgmRows = await env.DB.prepare(
+      `
+      SELECT id
+      FROM songs
+      WHERE lower(title) LIKE '%theme%'
+         OR lower(title) LIKE '%bgm%'
+         OR lower(movie) LIKE '%bgm%'
+      ORDER BY year DESC, lower(title) ASC
+      `,
+    ).all();
+    return (bgmRows.results || []).map((row) => cleanText(row.id)).filter(Boolean);
+  }
+  if (!aliases.length) return [];
+
+  const where = aliases.map(() => "(lower(composer) LIKE ? OR lower(artist) LIKE ?)").join(" OR ");
+  const bindings = [];
+  aliases.forEach((alias) => {
+    bindings.push(`%${alias}%`, `%${alias}%`);
+  });
+  const rows = await env.DB.prepare(
+    `
+    SELECT id
+    FROM songs
+    WHERE ${where}
+    ORDER BY year DESC, lower(title) ASC
+    `,
+  ).bind(...bindings).all();
+  return (rows.results || []).map((row) => cleanText(row.id)).filter(Boolean);
+}
+
+function playlistComposerAliases(name) {
+  const aliases = [];
+  const map = [
+    { match: /anirudh/, aliases: ["anirudh ravichander", "anirudh"] },
+    { match: /\barr\b|rahman/, aliases: ["a r rahman", "ar rahman", "rahman"] },
+    { match: /sean roldan/, aliases: ["sean roldan"] },
+    { match: /vijay antony/, aliases: ["vijay antony"] },
+    { match: /hiphop tamizha/, aliases: ["hiphop tamizha"] },
+    { match: /\bdeva\b/, aliases: ["deva"] },
+    { match: /ilaiyaraaja|ilayaraja/, aliases: ["ilaiyaraaja", "ilayaraja"] },
+    { match: /imman/, aliases: ["d imman", "imman"] },
+    { match: /yuvan/, aliases: ["yuvan shankar raja", "yuvan"] },
+    { match: /harris/, aliases: ["harris jayaraj", "harris"] },
+    { match: /santhosh narayanan/, aliases: ["santhosh narayanan"] },
+    { match: /g\.?\s*v\.?\s*prakash|gv prakash/, aliases: ["g v prakash", "gv prakash", "g. v. prakash"] },
+    { match: /sai top 50|sai\b/, aliases: ["sai abhyankkar", "sai"] },
+  ];
+  map.forEach((entry) => {
+    if (entry.match.test(name)) aliases.push(...entry.aliases);
+  });
+  return unique(aliases);
+}
+
+async function resolvePlaylistSongIds(env, refs) {
+  const resolved = [];
+  for (const ref of refs) {
+    const songId = await resolvePlaylistSongId(env, ref);
+    if (songId && !resolved.includes(songId)) resolved.push(songId);
+  }
+  return resolved;
+}
+
+async function resolvePlaylistSongId(env, ref) {
+  if (ref.id) {
+    const row = await env.DB.prepare("SELECT id FROM songs WHERE id = ?").bind(ref.id).first();
+    if (row?.id) return row.id;
+  }
+
+  if (ref.songPageUrl) {
+    const row = await env.DB.prepare(
+      "SELECT id FROM songs WHERE song_page_url = ? OR source_url = ? LIMIT 1",
+    ).bind(ref.songPageUrl, ref.songPageUrl).first();
+    if (row?.id) return row.id;
+  }
+
+  if (ref.sourceUrl) {
+    const row = await env.DB.prepare(
+      "SELECT id FROM songs WHERE source_url = ? OR song_page_url = ? LIMIT 1",
+    ).bind(ref.sourceUrl, ref.sourceUrl).first();
+    if (row?.id) return row.id;
+  }
+
+  if (ref.title && ref.movie) {
+    const row = await env.DB.prepare(
+      "SELECT id FROM songs WHERE lower(title) = ? AND lower(movie) = ? LIMIT 1",
+    ).bind(ref.title.toLowerCase(), ref.movie.toLowerCase()).first();
+    if (row?.id) return row.id;
+  }
+
+  if (ref.title) {
+    const row = await env.DB.prepare(
+      "SELECT id FROM songs WHERE lower(title) = ? LIMIT 1",
+    ).bind(ref.title.toLowerCase()).first();
+    if (row?.id) return row.id;
+  }
+
+  return "";
+}
+
+async function refreshAlbum(env, albumUrl, html) {
+  const albumTracks = extractAlbumTracks(html);
+  if (!albumTracks.length) return false;
+
+  const albumTitle = parseAlbumTitle(html) || "Untitled album";
+  const year = parseYear(html, albumUrl);
+  const composer = parseMusicDirector(html) || "Unknown composer";
+  const updatedAt = new Date().toISOString();
+
+  const statements = [];
+  statements.push(
+    env.DB.prepare("DELETE FROM songs WHERE album_url = ?").bind(albumUrl),
+    env.DB.prepare(
+      `
+      INSERT OR REPLACE INTO albums (
+        url, title, page_number, year, music_director, director, starring, lyricists,
+        zip_links_json, track_count, updated_at
+      ) VALUES (?, ?, 0, ?, ?, '', '', '', '[]', ?, ?)
+      `,
+    ).bind(albumUrl, albumTitle, year, composer, albumTracks.length, updatedAt),
+  );
+
+  for (const track of albumTracks) {
+    const payload = buildTrackPayload(track, {
+      albumUrl,
+      albumTitle,
+      composer,
+      year,
+      updatedAt,
+    });
+    statements.push(
+      env.DB.prepare(
+        `
+        INSERT OR REPLACE INTO songs (
+          id, album_url, title, artist, singers, composer, movie, year, mood,
+          song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+          remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
+          download_links_json, spotify_json, last_refreshed_at, link_status, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, '{}', ?, 'fresh', ?)
+        `,
+      ).bind(
+        payload.id,
+        payload.album_url,
+        payload.title,
+        payload.artist,
+        payload.artist,
+        payload.composer,
+        payload.movie,
+        payload.year,
+        payload.song_page_url,
+        payload.source_url,
+        payload.image_url,
+        payload.audio_url,
+        payload.audio_128_url,
+        payload.audio_320_url,
+        payload.remote_audio_128_url,
+        payload.remote_audio_320_url,
+        payload.download_links_json,
+        payload.last_refreshed_at,
+        payload.updated_at,
+      ),
+    );
+  }
+
+  statements.push(
+    env.DB.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('updatedAt', ?)").bind(updatedAt),
+  );
+  await env.DB.batch(statements);
+  return true;
+}
+
+function buildTrackPayload(track, context) {
+  const primary = cleanText(track.dl_path);
+  const audio128 = primary.includes("/p128_cdn/")
+    ? primary
+    : primary.includes("/p320_cdn/")
+      ? primary.replace("/p320_cdn/", "/p128_cdn/")
+      : extractBitrateLink(track.downloadLinks, 128) || "";
+  const audio320 = primary.includes("/p320_cdn/")
+    ? primary
+    : primary.includes("/p128_cdn/")
+      ? primary.replace("/p128_cdn/", "/p320_cdn/")
+      : extractBitrateLink(track.downloadLinks, 320) || "";
+  const downloadLinks = [];
+  if (audio320) downloadLinks.push({ label: "320kbps", url: audio320, bitrate: 320 });
+  if (audio128) downloadLinks.push({ label: "128kbps", url: audio128, bitrate: 128 });
+  return {
+    id: String(track.id),
+    album_url: context.albumUrl,
+    title: cleanText(track.name) || "Untitled",
+    artist: cleanText(track.artists) || "Unknown artist",
+    composer: context.composer,
+    movie: cleanText(track.m_name) || context.albumTitle,
+    year: context.year,
+    song_page_url: cleanText(track.songPageUrl) || context.albumUrl,
+    source_url: context.albumUrl,
+    image_url: cleanText(track.img_name)
+      ? `${SITE_ORIGIN}/uploads/album/${cleanText(track.img_name)}.jpg`
+      : "",
+    audio_url: audio320 || audio128,
+    audio_128_url: audio128,
+    audio_320_url: audio320,
+    remote_audio_128_url: audio128,
+    remote_audio_320_url: audio320,
+    download_links_json: JSON.stringify(downloadLinks),
+    last_refreshed_at: context.updatedAt,
+    updated_at: context.updatedAt,
+  };
+}
+
+function extractBitrateLink(downloadLinks, bitrate) {
+  if (!Array.isArray(downloadLinks)) return "";
+  for (const item of downloadLinks) {
+    if (Number(item?.bitrate) === bitrate && cleanText(item?.url)) return cleanText(item.url);
+    const label = cleanText(item?.label).toLowerCase();
+    if (label.includes(String(bitrate)) && cleanText(item?.url)) return cleanText(item.url);
+  }
+  return "";
+}
+
+async function fetchText(target) {
+  if (!target) return "";
+  const response = await fetch(target, {
+    headers: {
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      Referer: SITE_ORIGIN,
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    },
+    redirect: "follow",
+  });
+  if (!response.ok) return "";
+  return response.text();
+}
+
+function extractAlbumTracks(html) {
+  const match = html.match(/window\.albumTracks\s*=\s*(\[[\s\S]*?\]);/);
+  if (!match) return [];
+  try {
+    return JSON.parse(match[1]);
+  } catch {
+    return [];
+  }
+}
+
+function parseAlbumTitle(html) {
+  const heading = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return heading ? stripTags(heading[1]).slice(0, 180) : "";
+}
+
+function parseYear(html, albumUrl = "") {
+  const match = html.match(/Year:\s*(\d{4})/i);
+  return match ? Number(match[1]) : inferYear(albumUrl, html);
+}
+
+function parseMusicDirector(html) {
+  const text = stripTags(html);
+  const match = text.match(/Music:\s*(.+?)(?:\s+(?:Director:|Lyricists:|Year:|Language:|Starring:)|$)/i);
+  return match ? cleanText(match[1]).slice(0, 160) : "";
+}
+
+function extractAlbumLinks(html) {
+  const matches = [...html.matchAll(/href=["']([^"']*?-songs(?:\?[^"']*)?)["']/gi)];
+  return unique(matches.map((match) => absoluteUrl(match[1])).filter(Boolean));
+}
+
+function rowToSong(row) {
+  return {
+    id: row.id,
+    albumUrl: row.album_url,
+    title: cleanText(row.title),
+    artist: cleanText(row.artist),
+    composer: cleanText(row.composer),
+    movie: cleanText(row.movie),
+    year: Number(row.year || 0) || inferYear(row.album_url, row.movie, row.title, row.image_url, row.source_url),
+    mood: row.mood || "Imported",
+    audioUrl: `/api/stream/${row.id}`,
+    audio128Url: absoluteUrl(row.audio_128_url),
+    audio320Url: absoluteUrl(row.audio_320_url),
+    remoteAudio128Url: absoluteUrl(row.remote_audio_128_url),
+    remoteAudio320Url: absoluteUrl(row.remote_audio_320_url),
+    localAudio128Url: null,
+    localAudio320Url: null,
+    sourceUrl: row.source_url || row.song_page_url || row.album_url,
+    imageUrl: row.image_url,
+    downloadLinks: [],
+    spotify: {
+      album: null,
+      popularity: null,
+      previewAvailable: Boolean(row.audio_128_url || row.audio_320_url),
+    },
+    lastRefreshedAt: row.last_refreshed_at || null,
+    linkStatus: row.link_status || "unknown",
+  };
+}
+
+function absoluteUrl(value) {
+  const text = cleanText(value);
+  if (!text) return "";
+  if (text.startsWith("http://") || text.startsWith("https://")) return text;
+  if (text.startsWith("/")) return `${SITE_ORIGIN}${text}`;
+  return `${SITE_ORIGIN}/${text}`;
+}
+
+function stableSongId(albumUrl, title, trackNumber) {
+  const base = `${cleanText(albumUrl)}|${cleanText(title).toLowerCase()}|${Number(trackNumber || 0)}`;
+  let hash = 0;
+  for (let index = 0; index < base.length; index += 1) {
+    hash = ((hash << 5) - hash + base.charCodeAt(index)) | 0;
+  }
+  return `sync-${Math.abs(hash)}`;
+}
+
+function inferYearFromValues(values) {
+  return inferYear(...values);
+}
+
+function inferYear(...values) {
+  for (const value of values) {
+    const text = cleanText(value);
+    if (!text) continue;
+    const match = text.match(/(19|20)\d{2}/);
+    if (match) return Number(match[0]);
+  }
+  return 0;
+}
+
+function withCors(response) {
+  const headers = new Headers(response.headers);
+  const extras = corsHeaders();
+  for (const [key, value] of Object.entries(extras)) {
+    headers.set(key, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    headers,
+  });
+}
+
+async function warmSongs(env, origin, rows) {
+  for (const row of rows) {
+    try {
+      await warmSongInCache(env, origin, row);
+    } catch {
+      // keep warmup best-effort
+    }
+  }
+}
+
+async function warmSongInCache(env, origin, row) {
+  const cacheKey = new Request(`${origin}/api/stream/${row.id}`);
+  const cached = await caches.default.match(cacheKey);
+  if (cached) return true;
+
+  let response = await tryAudioCandidates(row, cacheKey);
+  if (!response) {
+    const refreshed = await tryRefreshSongLink(env, row);
+    if (refreshed) response = await tryAudioCandidates(refreshed, cacheKey);
+  }
+  if (!response) return false;
+
+  await caches.default.put(cacheKey, response.clone());
+  return true;
+}
+
+function cleanText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function stripTags(value) {
+  return cleanText(String(value || "").replace(/<[^>]+>/g, " "));
+}
+
+function toInt(value, fallback = 0) {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function unique(values) {
+  return [...new Set(values)];
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function slugValue(value) {
+  return cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || `playlist-${Date.now()}`;
+}
+
+function json(payload, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...corsHeaders(),
+    },
+  });
+}
+
+function corsHeaders() {
+  return {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-headers": "Content-Type, Range, x-sync-token",
+    "cache-control": "no-store",
+  };
+}

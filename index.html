@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sruthi - ஷ்ருதி</title>
+    <meta
+      name="description"
+      content="Tamil Music Vault"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Manrope:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <button id="mobile-menu-toggle" class="mobile-menu-button" type="button" aria-label="Open library menu" aria-expanded="false">
+      <span></span>
+      <span></span>
+      <span></span>
+    </button>
+    <div id="mobile-menu-backdrop" class="mobile-menu-backdrop" hidden></div>
+    <div class="app-shell">
+      <aside class="side-rail" id="side-rail">
+        <div class="brand-block">
+          <p class="kicker">Tamil Music Vault</p>
+          <h1>Sruthi - ஷ்ருதி</h1>
+          <p class="brand-copy">
+            A warm, classic listening room for a deep Tamil song library.
+          </p>
+        </div>
+
+        <div class="stats-panel">
+          <div class="stat-card">
+            <span>Albums</span>
+            <strong id="album-count">0</strong>
+          </div>
+          <div class="stat-card">
+            <span>Tracks</span>
+            <strong id="track-count">0</strong>
+          </div>
+        </div>
+
+        <button id="refresh-library" class="rail-button" type="button">
+          Refresh Library
+        </button>
+
+        <button id="show-all-rail" class="rail-button secondary-rail-button hidden" type="button">
+          All Songs
+        </button>
+
+        <section id="favorites-card" class="favorites-card library-collection-card">
+          <div class="favorites-head">
+            <div>
+              <p class="kicker">Library</p>
+              <h2>Favourites</h2>
+            </div>
+            <div class="favorites-tools">
+              <strong id="favorite-count">0</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="playlists-card">
+          <div class="favorites-head">
+            <div>
+              <p class="kicker">Curate</p>
+              <h2>Playlists</h2>
+            </div>
+            <strong id="playlist-count">0</strong>
+          </div>
+          <form id="playlist-form" class="playlist-form">
+            <input id="playlist-input" type="text" maxlength="40" placeholder="Create playlist" />
+            <button id="playlist-create" type="submit">Add</button>
+          </form>
+          <div id="playlist-list" class="playlist-list" aria-live="polite"></div>
+        </section>
+
+      </aside>
+
+      <main class="library-stage">
+        <header class="mobile-app-bar" aria-label="App header">
+          <div>
+            <p class="kicker">Tamil Music Vault</p>
+            <h2>Sruthi - ஷ்ருதி</h2>
+          </div>
+        </header>
+
+        <section class="player-bar">
+          <div class="player-bar-main">
+            <div class="player-avatar-wrap" aria-hidden="true">
+              <img class="player-avatar" src="./Sruthi_kutty.jpg" alt="" />
+            </div>
+
+            <div class="player-copy">
+              <p class="kicker">Now Playing</p>
+              <h3 id="now-title">Choose a song</h3>
+              <p id="now-artist">Select a track from the library.</p>
+            </div>
+
+            <dl class="player-meta">
+              <div>
+                <dt>Movie</dt>
+                <dd id="now-movie">-</dd>
+              </div>
+              <div>
+                <dt>Year</dt>
+                <dd id="now-year">-</dd>
+              </div>
+              <div>
+                <dt>Composer</dt>
+                <dd id="now-composer">-</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div class="player-transport">
+            <div class="player-actions">
+              <button id="previous-track" class="transport-button" type="button">Prev</button>
+              <button id="play-toggle" class="play-toggle" type="button">Play</button>
+              <button id="next-track" class="transport-button" type="button">Next</button>
+              <label class="mode-wrap" for="playback-mode">
+                <span class="sr-only">Playback mode</span>
+                <select id="playback-mode">
+                  <option value="normal">Normal</option>
+                  <option value="shuffle">Shuffle</option>
+                  <option value="repeat">Repeat</option>
+                  <option value="loop">Loop One</option>
+                </select>
+              </label>
+              <button id="favorite-toggle" class="transport-button heart-button" type="button" aria-pressed="false" title="Add to favourites">♡</button>
+              <label class="speed-wrap" for="speed-select">
+                <span class="sr-only">Playback speed</span>
+                <select id="speed-select">
+                  <option value="0.75">0.75x</option>
+                  <option value="1" selected>1x</option>
+                  <option value="1.25">1.25x</option>
+                  <option value="1.5">1.5x</option>
+                  <option value="2">2x</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="seek-shell">
+              <span id="current-time" class="time-stamp">0:00</span>
+              <input id="seek-bar" class="seek-bar" type="range" min="0" max="100" value="0" step="0.1" aria-label="Seek playback" />
+              <span id="duration-time" class="time-stamp">0:00</span>
+            </div>
+          </div>
+
+          <audio id="audio-player" preload="auto"></audio>
+          <p id="playback-status" class="playback-status"></p>
+        </section>
+
+        <section class="toolbar-card">
+          <label class="search-wrap" for="search-input">
+            <span class="sr-only">Search songs</span>
+            <input
+              id="search-input"
+              type="search"
+              placeholder="Search songs, albums, artists..."
+            />
+          </label>
+
+          <label class="select-wrap">
+            <span class="sr-only">Filter by decade</span>
+            <select id="decade-filter">
+              <option value="all">All decades</option>
+            </select>
+          </label>
+
+          <label class="toggle-wrap" for="local-songs">
+            <input id="local-songs" type="checkbox" />
+            <span>Local Songs</span>
+          </label>
+        </section>
+
+        <section class="catalog-card">
+          <div class="panel-head">
+            <div>
+              <p class="kicker">Library</p>
+              <h2 id="collection-title">Song Collection</h2>
+            </div>
+            <div class="panel-tools">
+              <label id="collection-sort-wrap" class="favorites-sort-wrap hidden" for="favorite-sort-body">
+                <span class="sr-only">Sort favourites</span>
+                <select id="favorite-sort-body">
+                  <option value="manual">Manual</option>
+                  <option value="recent">Recent</option>
+                  <option value="title">Title</option>
+                  <option value="composer">Composer</option>
+                </select>
+              </label>
+              <strong id="result-count">0 songs</strong>
+            </div>
+          </div>
+
+          <div id="song-list" class="song-list" aria-live="polite"></div>
+          <button id="load-more" class="load-more-button" type="button" hidden>
+            Load More
+          </button>
+        </section>
+      </main>
+    </div>
+
+    <template id="song-item-template">
+      <div class="song-row">
+        <button class="song-main" type="button">
+          <div class="song-core">
+            <p class="song-title"></p>
+            <p class="song-detail"></p>
+            <p class="song-subdetail"></p>
+          </div>
+          <div class="song-meta">
+            <span class="song-year"></span>
+          </div>
+        </button>
+        <div class="song-actions">
+          <label class="playlist-pick-wrap">
+            <span class="sr-only">Add to playlist</span>
+            <select class="playlist-pick">
+              <option value="">Add to playlist</option>
+            </select>
+          </label>
+          <button class="song-remove hidden" type="button">Remove</button>
+        </div>
+      </div>
+    </template>
+
+    <template id="playlist-item-template">
+      <div class="playlist-row">
+        <button class="playlist-main" type="button">
+          <p class="playlist-title"></p>
+          <p class="playlist-detail"></p>
+        </button>
+        <button class="playlist-remove" type="button" aria-label="Delete playlist">×</button>
+      </div>
+    </template>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

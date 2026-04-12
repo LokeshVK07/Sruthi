@@ -1,0 +1,22 @@
+{
+  "name": "sruthi",
+  "compatibility_date": "2026-04-08",
+  "main": "./src/worker.js",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    "SYNC_FEED_URL": "https://www.masstamilan.dev/sruthi-sync.json"
+  },
+  "triggers": {
+    "crons": ["0 */6 * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sruthi-db",
+      "database_id": "7e7f8f48-5f15-4ac8-bec0-37a899ddb33b"
+    }
+  ]
+}
