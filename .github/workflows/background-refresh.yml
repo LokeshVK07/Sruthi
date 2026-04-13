@@ -30,6 +30,7 @@ jobs:
     timeout-minutes: 90
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      GH_VARIABLES_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       SRUTHI_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_ACTIVE_D1_SLOT }}
       SRUTHI_D1_DB_A_ID: ${{ vars.SRUTHI_D1_DB_A_ID }}
@@ -67,6 +68,7 @@ jobs:
           missing=()
           for key in \
             CLOUDFLARE_API_TOKEN \
+            GH_VARIABLES_TOKEN \
             CLOUDFLARE_ACCOUNT_ID \
             SRUTHI_D1_DB_A_ID \
             SRUTHI_D1_DB_A_NAME \
@@ -154,6 +156,43 @@ jobs:
           echo "TARGET_DB_ID=$db_id" >> "$GITHUB_ENV"
           echo "TARGET_DB_NAME=$db_name" >> "$GITHUB_ENV"
           echo "TARGET_SLOT=$target" >> "$GITHUB_ENV"
+
+      - name: Verify GitHub variable update token access
+        env:
+          GH_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Missing required secret GH_VARIABLES_TOKEN. Create this repository secret before running the workflow."
+            exit 1
+          fi
+
+          if [[ "${TARGET_SLOT}" != "A" && "${TARGET_SLOT}" != "B" ]]; then
+            echo "::error::Resolved TARGET_SLOT must be A or B, got '${TARGET_SLOT}'."
+            exit 1
+          fi
+
+          if ! gh auth status >/tmp/gh-auth.txt 2>/tmp/gh-auth.err; then
+            echo "::error::GH_VARIABLES_TOKEN could not authenticate with GitHub CLI."
+            cat /tmp/gh-auth.err
+            exit 1
+          fi
+
+          set +e
+          gh api "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" >/tmp/slot-var.json 2>/tmp/slot-var.err
+          status=$?
+          set -e
+
+          if [[ $status -eq 0 ]]; then
+            echo "Verified repository variable API access for SRUTHI_ACTIVE_D1_SLOT."
+          elif grep -q "404" /tmp/slot-var.err; then
+            echo "SRUTHI_ACTIVE_D1_SLOT does not exist yet; workflow will create it after a successful deploy."
+          else
+            echo "::error::GH_VARIABLES_TOKEN does not have the required repository variables access."
+            cat /tmp/slot-var.err
+            exit 1
+          fi
 
       - name: Render deployment Wrangler config
         run: |
@@ -315,19 +354,47 @@ jobs:
 
       - name: Mark deployed D1 slot as active
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
         run: |
           set -euo pipefail
-          if gh api "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" >/dev/null 2>&1; then
-            gh api \
-              --method PATCH \
-              "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" \
-              -f name=SRUTHI_ACTIVE_D1_SLOT \
-              -f value="${TARGET_SLOT}"
-          else
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Missing required secret GH_VARIABLES_TOKEN. Cannot mark the active D1 slot."
+            exit 1
+          fi
+
+          if [[ "${TARGET_SLOT}" != "A" && "${TARGET_SLOT}" != "B" ]]; then
+            echo "::error::Refusing to write invalid TARGET_SLOT '${TARGET_SLOT}'. Expected A or B."
+            exit 1
+          fi
+
+          echo "Updating SRUTHI_ACTIVE_D1_SLOT to '${TARGET_SLOT}'."
+
+          set +e
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" \
+            -f name=SRUTHI_ACTIVE_D1_SLOT \
+            -f value="${TARGET_SLOT}" >/tmp/slot-patch.out 2>/tmp/slot-patch.err
+          patch_status=$?
+          set -e
+
+          if [[ $patch_status -eq 0 ]]; then
+            echo "Updated SRUTHI_ACTIVE_D1_SLOT successfully."
+            exit 0
+          fi
+
+          if grep -q "404" /tmp/slot-patch.err; then
+            echo "SRUTHI_ACTIVE_D1_SLOT does not exist yet. Creating it now."
             gh api \
               --method POST \
               "repos/${GITHUB_REPOSITORY}/actions/variables" \
               -f name=SRUTHI_ACTIVE_D1_SLOT \
-              -f value="${TARGET_SLOT}"
+              -f value="${TARGET_SLOT}" >/tmp/slot-create.out 2>/tmp/slot-create.err
+            echo "Created SRUTHI_ACTIVE_D1_SLOT successfully."
+            exit 0
           fi
+
+          echo "::error::Failed to update SRUTHI_ACTIVE_D1_SLOT."
+          cat /tmp/slot-patch.err
+          exit 1
