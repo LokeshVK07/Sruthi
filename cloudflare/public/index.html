@@ -90,9 +90,10 @@
         </header>
 
         <section class="player-bar">
+          <button id="mobile-player-minimize" class="mobile-player-minimize" type="button" aria-label="Minimize player">⌄</button>
           <div class="player-bar-main">
             <div class="player-avatar-wrap" aria-hidden="true">
-              <img class="player-avatar" src="./Sruthi_kutty.jpg" alt="" />
+              <img id="player-avatar" class="player-avatar" src="./Sruthi_kutty.jpg" alt="" />
             </div>
 
             <div class="player-copy">
@@ -122,6 +123,10 @@
               <button id="previous-track" class="transport-button" type="button">Prev</button>
               <button id="play-toggle" class="play-toggle" type="button">Play</button>
               <button id="next-track" class="transport-button" type="button">Next</button>
+            </div>
+
+            <div class="player-options">
+              <button id="mobile-mode-toggle" class="transport-button option-icon-button mobile-only-control" type="button" aria-label="Playback mode" title="Playback mode">↻</button>
               <label class="mode-wrap" for="playback-mode">
                 <span class="sr-only">Playback mode</span>
                 <select id="playback-mode">
@@ -131,7 +136,7 @@
                   <option value="loop">Loop One</option>
                 </select>
               </label>
-              <button id="favorite-toggle" class="transport-button heart-button" type="button" aria-pressed="false" title="Add to favourites">♡</button>
+              <button id="favorite-toggle" class="transport-button heart-button option-icon-button" type="button" aria-pressed="false" title="Add to favourites">♡</button>
               <label class="speed-wrap" for="speed-select">
                 <span class="sr-only">Playback speed</span>
                 <select id="speed-select">
@@ -142,6 +147,8 @@
                   <option value="2">2x</option>
                 </select>
               </label>
+              <button id="mobile-speed-toggle" class="transport-button option-icon-button mobile-only-control" type="button" aria-label="Playback speed" title="Playback speed">1x</button>
+              <button id="queue-toggle" class="transport-button queue-button option-icon-button" type="button" aria-expanded="false" aria-label="Show queue" title="Show queue">☰</button>
             </div>
 
             <div class="seek-shell">
@@ -153,6 +160,7 @@
             <div class="player-utility">
               <label class="volume-wrap" for="volume-control">
                 <span class="volume-icon" aria-hidden="true">🔊</span>
+                <span class="volume-label">Volume</span>
                 <span class="sr-only">Adjust volume</span>
                 <input
                   id="volume-control"
@@ -164,11 +172,20 @@
                   step="1"
                   aria-label="Volume"
                 />
+                <span id="volume-value" class="volume-value">85%</span>
               </label>
             </div>
           </div>
 
-          <audio id="audio-player" preload="auto"></audio>
+          <div id="queue-panel" class="queue-panel" hidden>
+            <div class="queue-panel-head">
+              <strong>Queue</strong>
+              <span id="queue-count">0 songs</span>
+            </div>
+            <div id="queue-list" class="queue-list"></div>
+          </div>
+
+          <audio id="audio-player" preload="auto" playsinline></audio>
           <p id="playback-status" class="playback-status"></p>
         </section>
 
@@ -220,6 +237,22 @@
             Load More
           </button>
         </section>
+
+        <div id="mobile-mini-player" class="mobile-mini-player" hidden>
+          <button id="mobile-mini-open" class="mobile-mini-main" type="button" aria-label="Open player">
+            <div class="mobile-mini-art" aria-hidden="true">
+              <img id="mobile-mini-art-image" src="./Sruthi_kutty.jpg" alt="" />
+            </div>
+            <div class="mobile-mini-copy">
+              <strong id="mobile-mini-title">Choose a song</strong>
+              <span id="mobile-mini-artist">Select a track from the library.</span>
+            </div>
+          </button>
+          <button id="mobile-mini-toggle" class="mobile-mini-toggle" type="button" aria-label="Play">▶</button>
+          <div class="mobile-mini-progress" aria-hidden="true">
+            <span id="mobile-mini-progress-bar"></span>
+          </div>
+        </div>
       </main>
     </div>
 
@@ -243,6 +276,7 @@
                 <option value="">Add to playlist</option>
               </select>
             </label>
+            <button class="song-menu-toggle" type="button" aria-label="Song actions" title="Song actions">⋯</button>
             <button class="song-remove hidden" type="button">Remove</button>
           </div>
         </div>
@@ -258,6 +292,19 @@
         <button class="playlist-remove" type="button" aria-label="Delete playlist">×</button>
       </div>
     </template>
+
+    <div id="song-context-menu" class="song-context-menu hidden" role="menu" aria-hidden="true">
+      <button type="button" data-action="favorite">
+        <span class="song-context-icon" aria-hidden="true">♡</span>
+        <span class="song-context-label">Favourites</span>
+      </button>
+      <button type="button" data-action="queue">
+        <span class="song-context-icon" aria-hidden="true">☰</span>
+        <span class="song-context-label">Queue</span>
+      </button>
+    </div>
+
+    <div id="app-toast" class="app-toast hidden" aria-live="polite" aria-atomic="true"></div>
 
     <script src="./app.js"></script>
   </body>
