@@ -151,6 +151,13 @@
               <button id="queue-toggle" class="transport-button queue-button option-icon-button" type="button" aria-expanded="false" aria-label="Show queue" title="Show queue">☰</button>
             </div>
 
+            <label class="mobile-player-playlist-wrap" for="mobile-player-playlist">
+              <span class="sr-only">Add current song to playlist</span>
+              <select id="mobile-player-playlist">
+                <option value="">Add to playlist</option>
+              </select>
+            </label>
+
             <div class="seek-shell">
               <span id="current-time" class="time-stamp">0:00</span>
               <input id="seek-bar" class="seek-bar" type="range" min="0" max="100" value="0" step="0.1" aria-label="Seek playback" />
@@ -175,14 +182,17 @@
                 <span id="volume-value" class="volume-value">85%</span>
               </label>
             </div>
-          </div>
-
-          <div id="queue-panel" class="queue-panel" hidden>
-            <div class="queue-panel-head">
-              <strong>Queue</strong>
-              <span id="queue-count">0 songs</span>
+            
+            <div id="queue-panel" class="queue-panel" hidden>
+              <div class="queue-panel-head">
+                <strong>Queue</strong>
+                <div class="queue-panel-tools">
+                  <span id="queue-count">0</span>
+                  <button id="queue-close" class="queue-close" type="button" aria-label="Close queue">×</button>
+                </div>
+              </div>
+              <div id="queue-list" class="queue-list"></div>
             </div>
-            <div id="queue-list" class="queue-list"></div>
           </div>
 
           <audio id="audio-player" preload="auto" playsinline></audio>

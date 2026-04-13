@@ -1,5 +1,22 @@
 const SITE_ORIGIN = "https://www.masstamilan.dev";
 const DEFAULT_SYNC_PATH = "/sruthi-sync.json";
+const DEFAULT_OFFICIAL_PLAYLISTS = [
+  { id: "top-100", name: "Top 100", sourceUrl: "https://www.masstamilan.dev/playlists/top-100-songs" },
+  { id: "bgm-50", name: "BGM 50", sourceUrl: "https://www.masstamilan.dev/playlists/top-50-bgm-songs" },
+  { id: "sai-top-50", name: "Sai Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/sai-abhyankkar-top-50-songs" },
+  { id: "sean-roldan-top-50", name: "Sean Roldan Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/sean-roldan-top-50-songs" },
+  { id: "vijay-antony-top-50", name: "Vijay Antony Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/vijay-antony-top-50-songs" },
+  { id: "hiphop-tamizha-kuthu", name: "Hiphop Tamizha Kuthu", sourceUrl: "https://www.masstamilan.dev/playlists/hiphop-tamizha-top-50-songs" },
+  { id: "deva-top-50", name: "Deva Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/deva-top-50-songs" },
+  { id: "anirudh-maxxx", name: "Anirudh Maxxx", sourceUrl: "https://www.masstamilan.dev/playlists/anirudh-ravichander-top-50-songs" },
+  { id: "santhosh-narayanan-melody", name: "Santhosh Narayanan Melody", sourceUrl: "https://www.masstamilan.dev/playlists/santhosh-narayanan-top-50-songs" },
+  { id: "arr-top-50", name: "ARR Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/a-r-rahman-top-50-songs" },
+  { id: "ilaiyaraaja-top-50", name: "Ilaiyaraaja Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/ilaiyaraaja-top-50-songs" },
+  { id: "imman-top-50", name: "Imman Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/d-imman-top-50-songs" },
+  { id: "yuvan-top-50", name: "Yuvan Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/yuvan-shankar-raja-top-50-songs" },
+  { id: "harris-hits", name: "Harris Hits", sourceUrl: "https://www.masstamilan.dev/playlists/harris-jayaraj-top-50-songs" },
+  { id: "g-v-prakash-top-50", name: "G. V. Prakash Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/g-v-prakash-kumar-top-50-songs" },
+];
 
 export default {
   async fetch(request, env, ctx) {
@@ -811,7 +828,13 @@ async function listOfficialPlaylists(env, { includeSongIds = true } = {}) {
     ORDER BY lower(name) ASC
     `,
   ).all();
-  const results = rows.results || [];
+  const results = (rows.results || []).length ? (rows.results || []) : DEFAULT_OFFICIAL_PLAYLISTS.map((playlist) => ({
+    id: playlist.id,
+    name: playlist.name,
+    source_url: playlist.sourceUrl,
+    updated_at: null,
+    song_count: 0,
+  }));
   const playlists = [];
   for (const row of results) {
     let songIds = [];
@@ -852,7 +875,7 @@ async function officialPlaylistSongIds(env, playlistId, playlistName = "") {
 }
 
 async function loadOfficialPlaylistDetail(env, playlistId) {
-  const row = await env.DB.prepare(
+  let row = await env.DB.prepare(
     `
     SELECT id, name, source_url, updated_at, song_count
     FROM official_playlists
@@ -860,7 +883,17 @@ async function loadOfficialPlaylistDetail(env, playlistId) {
     LIMIT 1
     `,
   ).bind(playlistId).first();
-  if (!row) return null;
+  if (!row) {
+    const fallback = DEFAULT_OFFICIAL_PLAYLISTS.find((playlist) => playlist.id === playlistId);
+    if (!fallback) return null;
+    row = {
+      id: fallback.id,
+      name: fallback.name,
+      source_url: fallback.sourceUrl,
+      updated_at: null,
+      song_count: 0,
+    };
+  }
 
   const songIds = await officialPlaylistSongIds(env, playlistId, cleanText(row.name));
   const songs = await loadSongsByIds(env, songIds);
@@ -901,8 +934,8 @@ async function loadSongsByIds(env, ids) {
 
 async function derivePlaylistSongIdsFromName(env, playlistName) {
   const normalized = cleanText(playlistName).toLowerCase();
-  const aliases = playlistComposerAliases(normalized);
-  if (!aliases.length && normalized.includes("bgm")) {
+  const spec = playlistComposerAliases(normalized);
+  if (!spec.aliases.length && normalized.includes("bgm")) {
     const bgmRows = await env.DB.prepare(
       `
       SELECT id
@@ -915,12 +948,16 @@ async function derivePlaylistSongIdsFromName(env, playlistName) {
     ).all();
     return (bgmRows.results || []).map((row) => cleanText(row.id)).filter(Boolean);
   }
-  if (!aliases.length) return [];
+  if (!spec.aliases.length || !spec.fields.length) return [];
 
-  const where = aliases.map(() => "(lower(composer) LIKE ? OR lower(artist) LIKE ?)").join(" OR ");
+  const normalizeExpr = (field) => `lower(replace(replace(replace(${field}, '.', ''), ' ', ''), '-', ''))`;
+  const where = spec.aliases.map(() => `(${spec.fields.map((field) => `${normalizeExpr(field)} LIKE ?`).join(" OR ")})`).join(" OR ");
   const bindings = [];
-  aliases.forEach((alias) => {
-    bindings.push(`%${alias}%`, `%${alias}%`);
+  spec.aliases.forEach((alias) => {
+    const token = alias.toLowerCase().replace(/[.\s-]+/g, "");
+    spec.fields.forEach(() => {
+      bindings.push(`%${token}%`);
+    });
   });
   const rows = await env.DB.prepare(
     `
@@ -934,26 +971,29 @@ async function derivePlaylistSongIdsFromName(env, playlistName) {
 }
 
 function playlistComposerAliases(name) {
-  const aliases = [];
+  const matches = [];
   const map = [
-    { match: /anirudh/, aliases: ["anirudh ravichander", "anirudh"] },
-    { match: /\barr\b|rahman/, aliases: ["a r rahman", "ar rahman", "rahman"] },
-    { match: /sean roldan/, aliases: ["sean roldan"] },
-    { match: /vijay antony/, aliases: ["vijay antony"] },
-    { match: /hiphop tamizha/, aliases: ["hiphop tamizha"] },
-    { match: /\bdeva\b/, aliases: ["deva"] },
-    { match: /ilaiyaraaja|ilayaraja/, aliases: ["ilaiyaraaja", "ilayaraja"] },
-    { match: /imman/, aliases: ["d imman", "imman"] },
-    { match: /yuvan/, aliases: ["yuvan shankar raja", "yuvan"] },
-    { match: /harris/, aliases: ["harris jayaraj", "harris"] },
-    { match: /santhosh narayanan/, aliases: ["santhosh narayanan"] },
-    { match: /g\.?\s*v\.?\s*prakash|gv prakash/, aliases: ["g v prakash", "gv prakash", "g. v. prakash"] },
-    { match: /sai top 50|sai\b/, aliases: ["sai abhyankkar", "sai"] },
+    { match: /anirudh/, aliases: ["anirudh ravichander", "anirudh"], fields: ["composer"] },
+    { match: /\barr\b|rahman/, aliases: ["a r rahman", "ar rahman", "a.r. rahman"], fields: ["composer"] },
+    { match: /sean roldan/, aliases: ["sean roldan"], fields: ["composer"] },
+    { match: /vijay antony/, aliases: ["vijay antony"], fields: ["composer"] },
+    { match: /hiphop tamizha/, aliases: ["hiphop tamizha"], fields: ["artist"] },
+    { match: /\bdeva\b/, aliases: ["deva"], fields: ["composer"] },
+    { match: /ilaiyaraaja|ilayaraja/, aliases: ["ilaiyaraaja", "ilayaraja"], fields: ["composer"] },
+    { match: /imman/, aliases: ["d imman", "imman"], fields: ["composer"] },
+    { match: /yuvan/, aliases: ["yuvan shankar raja", "yuvan"], fields: ["composer"] },
+    { match: /harris/, aliases: ["harris jayaraj", "harris"], fields: ["composer"] },
+    { match: /santhosh narayanan/, aliases: ["santhosh narayanan"], fields: ["composer"] },
+    { match: /g\.?\s*v\.?\s*prakash|gv prakash/, aliases: ["g v prakash", "gv prakash", "g. v. prakash"], fields: ["composer"] },
+    { match: /sai top 50|sai\b/, aliases: ["sai abhyankkar", "sai"], fields: ["artist"] },
   ];
   map.forEach((entry) => {
-    if (entry.match.test(name)) aliases.push(...entry.aliases);
+    if (entry.match.test(name)) matches.push(entry);
   });
-  return unique(aliases);
+  return {
+    aliases: unique(matches.flatMap((entry) => entry.aliases)),
+    fields: unique(matches.flatMap((entry) => entry.fields || ["composer"])),
+  };
 }
 
 async function resolvePlaylistSongIds(env, refs) {
