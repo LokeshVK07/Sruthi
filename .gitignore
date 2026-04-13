@@ -9,6 +9,7 @@ __pycache__/
 node_modules/
 cloudflare/node_modules/
 cloudflare/.wrangler/
+cloudflare/wrangler.deploy.jsonc
 cloudflare/data/seed.sql
 cloudflare/data/*.duckdb
 data/*.db

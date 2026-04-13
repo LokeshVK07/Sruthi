@@ -1109,6 +1109,24 @@ def build_index_payload_from_db():
     }
 
 
+def write_runtime_catalog_files_from_db():
+    raw_payload = build_raw_catalog_from_db()
+    write_json(RAW_CATALOG_PATH, raw_payload)
+    index_payload = build_index_payload_from_db()
+    write_json(INDEX_PATH, index_payload)
+    write_json(
+        STATUS_PATH,
+        {
+            "albumCount": index_payload.get("summary", {}).get("albumCount", 0),
+            "trackCount": index_payload.get("summary", {}).get("trackCount", 0),
+            "updatedAt": index_payload.get("updatedAt"),
+            "isEmpty": not bool(index_payload.get("songs")),
+        },
+    )
+    SONG_RECORD_CACHE.clear()
+    return index_payload
+
+
 def normalize_catalog(raw_catalog=None):
     payload = raw_catalog or load_raw_catalog()
     normalized_albums = [normalize_album(album) for album in payload.get("albums", [])]
