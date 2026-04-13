@@ -1,15 +1,17 @@
 name: Background Refresh
 
 on:
-  schedule:
-    - cron: "17 */6 * * *"
   workflow_dispatch:
+  
     inputs:
       full_refresh:
         description: Run a full catalog refresh instead of incremental mode
         required: false
         default: false
         type: boolean
+
+  schedule:
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: read
