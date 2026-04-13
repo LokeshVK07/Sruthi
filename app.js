@@ -59,6 +59,7 @@ const nodes = {
   playbackMode: document.querySelector("#playback-mode"),
   favoriteToggle: document.querySelector("#favorite-toggle"),
   speedSelect: document.querySelector("#speed-select"),
+  volumeControl: document.querySelector("#volume-control"),
   audioPlayer: document.querySelector("#audio-player"),
   seekBar: document.querySelector("#seek-bar"),
   currentTime: document.querySelector("#current-time"),
@@ -280,6 +281,7 @@ function updateTransportState() {
   nodes.favoriteToggle.textContent = isFavorite(state.selectedSongId) ? "♥" : "♡";
   nodes.speedSelect.value = String(state.playbackSpeed);
   nodes.playbackMode.value = state.playbackMode;
+  nodes.volumeControl.value = String(Math.round((nodes.audioPlayer.volume ?? 0.85) * 100));
 
   if (!hasSongs || index < 0) {
     nodes.previousTrack.disabled = true;
@@ -580,10 +582,33 @@ function prefetchSongIds(songIds) {
   postJson("/api/prefetch", { ids }).catch(() => {});
 }
 
+function waitForPlayableAudio() {
+  if (nodes.audioPlayer.readyState >= 2) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      nodes.audioPlayer.removeEventListener("canplay", onReady);
+      nodes.audioPlayer.removeEventListener("loadeddata", onReady);
+      nodes.audioPlayer.removeEventListener("error", onDone);
+      window.clearTimeout(timeoutId);
+      resolve();
+    };
+    const onReady = () => finish();
+    const onDone = () => finish();
+    const timeoutId = window.setTimeout(finish, 2200);
+    nodes.audioPlayer.addEventListener("canplay", onReady, { once: true });
+    nodes.audioPlayer.addEventListener("loadeddata", onReady, { once: true });
+    nodes.audioPlayer.addEventListener("error", onDone, { once: true });
+  });
+}
+
 async function playCurrentSong() {
   const song = selectedSong();
   if (!song || !playbackUrlForSong(song)) return;
   try {
+    await waitForPlayableAudio();
     await nodes.audioPlayer.play();
     nodes.playToggle.textContent = "Pause";
   } catch (_) {
@@ -603,6 +628,7 @@ async function selectSong(songId, { autoplay = false } = {}) {
   }
   state.selectedSongId = songId;
   renderSongs();
+  await new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
   const index = selectedSongIndex();
   prefetchSongIds([songId, state.songs[index - 1]?.id, state.songs[index + 1]?.id]);
   if (autoplay) await playCurrentSong();
@@ -888,6 +914,10 @@ function bindEvents() {
     state.playbackSpeed = Number(event.target.value) || 1;
     nodes.audioPlayer.playbackRate = state.playbackSpeed;
   });
+  nodes.volumeControl.addEventListener("input", (event) => {
+    const nextVolume = Math.min(1, Math.max(0, Number(event.target.value) / 100));
+    nodes.audioPlayer.volume = nextVolume;
+  });
   nodes.favoriteToggle.addEventListener("click", toggleFavoriteForSelectedSong);
 
   nodes.seekBar.addEventListener("input", () => {
@@ -967,6 +997,8 @@ async function bootstrap() {
   renderFavorites();
   renderPlaylists();
   renderTransportLabels();
+  nodes.audioPlayer.volume = 0.85;
+  nodes.volumeControl.value = "85";
   mobileMediaQuery.addEventListener("change", () => {
     renderTransportLabels();
     if (!mobileMediaQuery.matches) setMobileMenuOpen(false);

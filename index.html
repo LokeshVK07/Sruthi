@@ -149,6 +149,23 @@
               <input id="seek-bar" class="seek-bar" type="range" min="0" max="100" value="0" step="0.1" aria-label="Seek playback" />
               <span id="duration-time" class="time-stamp">0:00</span>
             </div>
+
+            <div class="player-utility">
+              <label class="volume-wrap" for="volume-control">
+                <span class="volume-icon" aria-hidden="true">🔊</span>
+                <span class="sr-only">Adjust volume</span>
+                <input
+                  id="volume-control"
+                  class="volume-bar"
+                  type="range"
+                  min="0"
+                  max="100"
+                  value="85"
+                  step="1"
+                  aria-label="Volume"
+                />
+              </label>
+            </div>
           </div>
 
           <audio id="audio-player" preload="auto"></audio>
@@ -214,18 +231,20 @@
             <p class="song-detail"></p>
             <p class="song-subdetail"></p>
           </div>
+        </button>
+        <div class="song-side">
           <div class="song-meta">
             <span class="song-year"></span>
           </div>
-        </button>
-        <div class="song-actions">
-          <label class="playlist-pick-wrap">
-            <span class="sr-only">Add to playlist</span>
-            <select class="playlist-pick">
-              <option value="">Add to playlist</option>
-            </select>
-          </label>
-          <button class="song-remove hidden" type="button">Remove</button>
+          <div class="song-actions">
+            <label class="playlist-pick-wrap">
+              <span class="sr-only">Add to playlist</span>
+              <select class="playlist-pick">
+                <option value="">Add to playlist</option>
+              </select>
+            </label>
+            <button class="song-remove hidden" type="button">Remove</button>
+          </div>
         </div>
       </div>
     </template>
