@@ -316,6 +316,40 @@
 
     <div id="app-toast" class="app-toast hidden" aria-live="polite" aria-atomic="true"></div>
 
+    <div id="shortcuts-modal" class="shortcuts-modal" hidden>
+      <div class="shortcuts-content">
+        <div class="shortcuts-head">
+          <h2>Keyboard Shortcuts</h2>
+          <button class="shortcuts-close" type="button" aria-label="Close shortcuts" onclick="document.getElementById('shortcuts-modal').hidden = true;">×</button>
+        </div>
+        <div class="shortcuts-grid">
+          <div class="shortcuts-section">
+            <h3>Playback</h3>
+            <div class="shortcut-row"><span>Play / Pause</span><span class="shortcut-key">Space / K</span></div>
+            <div class="shortcut-row"><span>Next Track</span><span class="shortcut-key">→ / N</span></div>
+            <div class="shortcut-row"><span>Previous Track</span><span class="shortcut-key">← / P</span></div>
+            <div class="shortcut-row"><span>Seek Back 10s</span><span class="shortcut-key">J</span></div>
+          </div>
+          <div class="shortcuts-section">
+            <h3>Volume & Options</h3>
+            <div class="shortcut-row"><span>Volume Up</span><span class="shortcut-key">↑</span></div>
+            <div class="shortcut-row"><span>Volume Down</span><span class="shortcut-key">↓</span></div>
+            <div class="shortcut-row"><span>Mute</span><span class="shortcut-key">M</span></div>
+            <div class="shortcut-row"><span>Shuffle Toggle</span><span class="shortcut-key">S</span></div>
+            <div class="shortcut-row"><span>Repeat Toggle</span><span class="shortcut-key">R</span></div>
+          </div>
+          <div class="shortcuts-section">
+            <h3>Navigation</h3>
+            <div class="shortcut-row"><span>Like / Favorite</span><span class="shortcut-key">L</span></div>
+            <div class="shortcut-row"><span>Fullscreen</span><span class="shortcut-key">F</span></div>
+            <div class="shortcut-row"><span>Focus Search</span><span class="shortcut-key">/</span></div>
+            <div class="shortcut-row"><span>Toggle Queue</span><span class="shortcut-key">Q</span></div>
+            <div class="shortcut-row"><span>Close Panels</span><span class="shortcut-key">Esc</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <script src="./app.js"></script>
   </body>
 </html>

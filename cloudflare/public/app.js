@@ -250,61 +250,175 @@ function scheduleMediaSessionPosition() {
   });
 }
 
-function syncMediaSession() {
-  if (!("mediaSession" in navigator)) return;
-  const song = selectedSong();
-  if (!song) {
-    navigator.mediaSession.metadata = null;
-    navigator.mediaSession.playbackState = "none";
-    return;
-  }
-
-  try {
-    navigator.mediaSession.metadata = new MediaMetadata({
+const playerAPI = {
+  play: () => playCurrentSong(),
+  pause: () => nodes.audioPlayer.pause(),
+  togglePlayPause: () => togglePlayback(),
+  next: () => stepTrack(1),
+  previous: () => stepTrack(-1),
+  seekBy: (seconds) => {
+    const duration = Number.isFinite(nodes.audioPlayer.duration) ? nodes.audioPlayer.duration : Number.MAX_SAFE_INTEGER;
+    nodes.audioPlayer.currentTime = Math.max(0, Math.min(duration, (nodes.audioPlayer.currentTime || 0) + seconds));
+    updateTransportState();
+  },
+  volumeUp: () => applyVolume(state.volumeLevel + 0.1),
+  volumeDown: () => applyVolume(state.volumeLevel - 0.1),
+  toggleMute: () => applyVolume(state.volumeLevel > 0 ? 0 : 0.85),
+  toggleShuffle: () => {
+    setPlaybackMode(state.playbackMode === 'shuffle' ? 'normal' : 'shuffle');
+    if (nodes.playbackMode) nodes.playbackMode.value = state.playbackMode;
+    showToast(playbackModeMeta(state.playbackMode).label);
+  },
+  cycleRepeatMode: () => {
+    const nextMode = state.playbackMode === 'repeat' ? 'loop' : (state.playbackMode === 'loop' ? 'normal' : 'repeat');
+    setPlaybackMode(nextMode);
+    if (nodes.playbackMode) nodes.playbackMode.value = state.playbackMode;
+    showToast(playbackModeMeta(state.playbackMode).label);
+  },
+  toggleLike: () => toggleFavoriteForSelectedSong(),
+  toggleFullscreen: () => {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
+    else document.exitFullscreen().catch(() => {});
+  },
+  focusSearch: () => {
+    if (nodes.searchInput) nodes.searchInput.focus();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  },
+  toggleQueue: () => {
+    if (nodes.queueToggle && nodes.queuePanel) {
+      nodes.queueToggle.click();
+    } else {
+      const nextOpen = !queuePanelOpen;
+      setQueuePanelOpen(nextOpen);
+      if (nextOpen) ensureQueueSongsCached().then(() => renderQueuePanel());
+    }
+  },
+  closePanels: () => {
+    setQueuePanelOpen(false);
+    closeSongContextMenu();
+    const modal = document.getElementById("shortcuts-modal");
+    if (modal) modal.hidden = true;
+  },
+  get isPlaying() { return !nodes.audioPlayer.paused; },
+  get currentTrack() {
+    const song = selectedSong();
+    return song ? {
       title: song.title || "Sruthi",
       artist: song.artist || song.composer || "Tamil Music Vault",
       album: song.movie || "Sruthi",
-      artwork: [{ src: artworkUrlForSong(song), sizes: "512x512", type: "image/jpeg" }],
-    });
-  } catch (_) {
-    // ignore metadata issues
+      artwork: [{ src: artworkUrlForSong(song), sizes: "512x512", type: "image/jpeg" }]
+    } : null;
   }
+};
 
-  navigator.mediaSession.playbackState = nodes.audioPlayer.paused ? "paused" : "playing";
+function updateMetadata(track) {
+  if (!("mediaSession" in navigator)) return;
+  if (!track) {
+    navigator.mediaSession.metadata = null;
+    return;
+  }
+  try {
+    navigator.mediaSession.metadata = new MediaMetadata(track);
+  } catch (_) {}
+}
+
+function updatePlaybackState(player) {
+  if (!("mediaSession" in navigator)) return;
+  navigator.mediaSession.playbackState = player.isPlaying ? "playing" : "paused";
   updateMediaSessionPosition();
 }
 
-function bindMediaSessionHandlers() {
+function setupMediaSession(player) {
   if (!("mediaSession" in navigator)) return;
   const bindings = {
-    play: () => { void playCurrentSong(); },
-    pause: () => { nodes.audioPlayer.pause(); },
-    previoustrack: () => { void stepTrack(-1); },
-    nexttrack: () => { void stepTrack(1); },
-    seekbackward: (details) => {
-      const step = Number(details?.seekOffset) || 10;
-      nodes.audioPlayer.currentTime = Math.max(0, (nodes.audioPlayer.currentTime || 0) - step);
-      updateTransportState();
-    },
-    seekforward: (details) => {
-      const step = Number(details?.seekOffset) || 10;
-      const duration = Number.isFinite(nodes.audioPlayer.duration) ? nodes.audioPlayer.duration : Number.MAX_SAFE_INTEGER;
-      nodes.audioPlayer.currentTime = Math.min(duration, (nodes.audioPlayer.currentTime || 0) + step);
-      updateTransportState();
-    },
+    play: () => player.play(),
+    pause: () => player.pause(),
+    previoustrack: () => player.previous(),
+    nexttrack: () => player.next(),
+    seekbackward: (details) => player.seekBy(-(details?.seekOffset || 10)),
+    seekforward: (details) => player.seekBy(details?.seekOffset || 10),
     seekto: (details) => {
-      if (!Number.isFinite(details?.seekTime)) return;
-      nodes.audioPlayer.currentTime = details.seekTime;
-      updateTransportState();
-    },
+      if (Number.isFinite(details?.seekTime)) {
+        nodes.audioPlayer.currentTime = details.seekTime;
+        updateTransportState();
+      }
+    }
   };
   Object.entries(bindings).forEach(([action, handler]) => {
-    try {
-      navigator.mediaSession.setActionHandler(action, handler);
-    } catch (_) {
-      // ignore unsupported handlers
+    try { navigator.mediaSession.setActionHandler(action, handler); } catch (_) {}
+  });
+}
+
+function setupKeyboardShortcuts(player) {
+  document.addEventListener("keydown", (event) => {
+    const target = event.target;
+    if (target.matches("input, textarea, [contenteditable]")) return;
+    
+    switch (event.key) {
+      case " ":
+      case "k": case "K":
+        event.preventDefault();
+        player.togglePlayPause();
+        break;
+      case "ArrowRight":
+      case "n": case "N":
+        player.next();
+        break;
+      case "ArrowLeft":
+      case "p": case "P":
+        player.previous();
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        player.volumeUp();
+        break;
+      case "ArrowDown":
+        event.preventDefault();
+        player.volumeDown();
+        break;
+      case "m": case "M":
+        player.toggleMute();
+        break;
+      case "j": case "J":
+        player.seekBy(-10);
+        break;
+      case "f": case "F":
+        player.toggleFullscreen();
+        break;
+      case "s": case "S":
+        player.toggleShuffle();
+        break;
+      case "r": case "R":
+        player.cycleRepeatMode();
+        break;
+      case "l": case "L":
+        player.toggleLike();
+        break;
+      case "/":
+        event.preventDefault();
+        player.focusSearch();
+        break;
+      case "q": case "Q":
+        player.toggleQueue();
+        break;
+      case "?": {
+        const modal = document.getElementById("shortcuts-modal");
+        if (modal) modal.hidden = !modal.hidden;
+        break;
+      }
     }
   });
+}
+
+function syncMediaSession() {
+  updatePlaybackState(playerAPI);
+  const track = playerAPI.currentTrack;
+  updateMetadata(track);
+}
+
+function bindMediaSessionHandlers() {
+  setupMediaSession(playerAPI);
+  setupKeyboardShortcuts(playerAPI);
 }
 
 async function ensureAudioPipeline() {
