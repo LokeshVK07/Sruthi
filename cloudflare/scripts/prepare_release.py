@@ -35,9 +35,14 @@ def load_rows(connection, sql):
 def validate_sqlite_source(db_path: Path):
   if not db_path.exists():
     raise RuntimeError(f"SQLite database not found: {db_path}")
+  if db_path.stat().st_size < 4096:
+    raise RuntimeError(f"SQLite database is unexpectedly small: {db_path.stat().st_size} bytes")
 
   connection = sqlite3.connect(db_path)
   try:
+    quick_check = connection.execute("PRAGMA quick_check").fetchone()
+    if quick_check and quick_check[0] != "ok":
+      raise RuntimeError(f"SQLite integrity check failed: {quick_check[0]}")
     album_rows = load_rows(
       connection,
       """
@@ -160,9 +165,16 @@ def validate_metrics(metrics, baseline_path: Path):
     raise RuntimeError("Release validation failed:\n- " + "\n- ".join(errors))
 
 
-def generate_seed(seed_path: Path):
+def generate_seed(db_path: Path, seed_path: Path):
   subprocess.run(
-    [sys.executable, str(ROOT / "cloudflare" / "scripts" / "export_d1_sql.py")],
+    [
+      sys.executable,
+      str(ROOT / "cloudflare" / "scripts" / "export_d1_sql.py"),
+      "--db",
+      str(db_path),
+      "--out",
+      str(seed_path),
+    ],
     cwd=str(ROOT),
     check=True,
   )
@@ -172,8 +184,17 @@ def generate_seed(seed_path: Path):
     raise RuntimeError(f"Seed file is unexpectedly small: {seed_path.stat().st_size} bytes")
 
   text = seed_path.read_text(encoding="utf-8", errors="ignore")
-  if "CREATE TABLE songs" not in text or "INSERT INTO songs" not in text:
-    raise RuntimeError("Seed file is missing required songs schema or insert statements.")
+  required_markers = [
+    "CREATE TABLE app_meta",
+    "CREATE TABLE albums",
+    "CREATE TABLE songs",
+    "INSERT INTO app_meta",
+    "INSERT INTO albums",
+    "INSERT INTO songs",
+  ]
+  missing_markers = [marker for marker in required_markers if marker not in text]
+  if missing_markers:
+    raise RuntimeError(f"Seed file is missing required SQL markers: {', '.join(missing_markers)}")
 
 
 def write_manifest(manifest_path: Path, metrics, source_updated_at):
@@ -198,10 +219,15 @@ def write_manifest(manifest_path: Path, metrics, source_updated_at):
 
 def main():
   args = parse_args()
+  args.db = args.db.resolve()
+  args.seed = args.seed.resolve()
+  args.baseline = args.baseline.resolve()
+  args.manifest = args.manifest.resolve()
+  args.duckdb_path = args.duckdb_path.resolve()
   source = validate_sqlite_source(args.db)
   metrics = compute_metrics(source, args.duckdb_path)
   validate_metrics(metrics, args.baseline)
-  generate_seed(args.seed)
+  generate_seed(args.db, args.seed)
   write_manifest(args.manifest, metrics, source["updatedAt"])
   print(json.dumps({"ok": True, "metrics": metrics}, indent=2))
 

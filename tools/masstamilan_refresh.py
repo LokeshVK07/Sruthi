@@ -2,17 +2,17 @@
 
 import argparse
 import json
+import os
 import random
 import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
-from urllib.parse import urljoin, urlparse
+from typing import Dict, List
+from urllib.parse import urljoin
 
 import cloudscraper
-import requests
 from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,9 +33,10 @@ CHALLENGE_MARKERS = (
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Refresh Sruthi from MassTamilan without browser automation.")
+    default_workers = max(4, min(16, os.cpu_count() or 4))
     parser.add_argument("--start-page", type=int, default=1)
     parser.add_argument("--max-pages", type=int, default=800)
-    parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--workers", type=int, default=default_workers)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--page-delay", type=float, default=0.2)
     parser.add_argument("--album-delay", type=float, default=0.15)
@@ -510,6 +511,12 @@ def configure_server_paths():
 def main():
     args = parse_args()
     configure_server_paths()
+    if args.workers <= 0:
+        raise SystemExit("--workers must be greater than 0")
+    if args.batch_size <= 0:
+        raise SystemExit("--batch-size must be greater than 0")
+    if args.start_page <= 0 or args.max_pages <= 0:
+        raise SystemExit("--start-page and --max-pages must be greater than 0")
 
     if args.print_summary_only:
         payload = server.build_index_payload_from_db()

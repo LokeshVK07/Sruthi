@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import json
+import argparse
 import sqlite3
 from pathlib import Path
 
@@ -69,6 +69,13 @@ CREATE INDEX idx_songs_link_status ON songs(link_status);
 """
 
 
+def parse_args():
+  parser = argparse.ArgumentParser(description="Export the local Sruthi SQLite catalog to a Cloudflare D1 seed SQL file.")
+  parser.add_argument("--db", type=Path, default=DB_PATH)
+  parser.add_argument("--out", type=Path, default=OUT_PATH)
+  return parser.parse_args()
+
+
 def sql_value(value):
   if value is None:
     return "NULL"
@@ -83,12 +90,25 @@ def write_insert(handle, table, columns, row):
   handle.write(f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({values});\n")
 
 
+def assert_source_db(db_path: Path):
+  if not db_path.exists():
+    raise RuntimeError(f"SQLite source database not found: {db_path}")
+  if db_path.stat().st_size < 4096:
+    raise RuntimeError(f"SQLite source database looks too small: {db_path} ({db_path.stat().st_size} bytes)")
+
+
 def main():
-  OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-  connection = sqlite3.connect(DB_PATH)
+  args = parse_args()
+  db_path = args.db.resolve()
+  out_path = args.out.resolve()
+
+  assert_source_db(db_path)
+  out_path.parent.mkdir(parents=True, exist_ok=True)
+
+  connection = sqlite3.connect(db_path)
   connection.row_factory = sqlite3.Row
 
-  with OUT_PATH.open("w", encoding="utf-8") as handle:
+  with out_path.open("w", encoding="utf-8") as handle:
     handle.write("-- Generated from local SQLite catalog for Cloudflare D1\n")
     handle.write(SCHEMA.strip())
     handle.write("\n\n")
@@ -158,7 +178,12 @@ def main():
     ):
       write_insert(handle, "songs", song_columns, row)
 
-  print(f"Wrote {OUT_PATH}")
+  connection.close()
+
+  if not out_path.exists() or out_path.stat().st_size < 4096:
+    raise RuntimeError(f"Generated seed file is unexpectedly small: {out_path}")
+
+  print(f"Wrote {out_path}")
 
 
 if __name__ == "__main__":

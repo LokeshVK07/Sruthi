@@ -2,14 +2,12 @@ name: Background Refresh
 
 on:
   workflow_dispatch:
-  
     inputs:
       full_refresh:
         description: Run a full catalog refresh instead of incremental mode
         required: false
         default: false
         type: boolean
-
   schedule:
     - cron: "17 */6 * * *"
 
@@ -21,16 +19,27 @@ concurrency:
   group: sruthi-background-refresh
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   refresh-and-deploy:
+    name: Refresh and Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       SRUTHI_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_ACTIVE_D1_SLOT }}
       SRUTHI_D1_DB_A_ID: ${{ vars.SRUTHI_D1_DB_A_ID }}
       SRUTHI_D1_DB_A_NAME: ${{ vars.SRUTHI_D1_DB_A_NAME }}
       SRUTHI_D1_DB_B_ID: ${{ vars.SRUTHI_D1_DB_B_ID }}
       SRUTHI_D1_DB_B_NAME: ${{ vars.SRUTHI_D1_DB_B_NAME }}
+      WRANGLER_SEND_METRICS: "false"
+      GENERATED_WRANGLER_CONFIG: cloudflare/.generated/wrangler.deploy.jsonc
+      RELEASE_MANIFEST: cloudflare/.generated/release-manifest.json
+      RELEASE_DUCKDB: cloudflare/.generated/release-check.duckdb
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -47,14 +56,92 @@ jobs:
 
       - name: Install workflow dependencies
         run: |
-          python -m pip install --upgrade pip duckdb
-          python -m pip install requests beautifulsoup4 cloudscraper
-          npm install -g wrangler
+          python -m pip install --upgrade pip
+          python -m pip install duckdb requests beautifulsoup4 cloudscraper
+          npm install --global wrangler@4.81.1
+
+      - name: Validate workflow configuration
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for key in \
+            CLOUDFLARE_API_TOKEN \
+            CLOUDFLARE_ACCOUNT_ID \
+            SRUTHI_D1_DB_A_ID \
+            SRUTHI_D1_DB_A_NAME \
+            SRUTHI_D1_DB_B_ID \
+            SRUTHI_D1_DB_B_NAME; do
+            if [[ -z "${!key:-}" ]]; then
+              missing+=("$key")
+            fi
+          done
+
+          if (( ${#missing[@]} > 0 )); then
+            echo "::error::Missing required GitHub Actions secrets/variables: ${missing[*]}"
+            exit 1
+          fi
+
+          if [[ "${SRUTHI_D1_DB_A_ID}" == "${SRUTHI_D1_DB_B_ID}" ]]; then
+            echo "::error::D1 slot A and B database ids must be different."
+            exit 1
+          fi
+
+          if [[ "${SRUTHI_D1_DB_A_NAME}" == "${SRUTHI_D1_DB_B_NAME}" ]]; then
+            echo "::error::D1 slot A and B database names must be different."
+            exit 1
+          fi
+
+          if [[ -n "${SRUTHI_ACTIVE_D1_SLOT:-}" && "${SRUTHI_ACTIVE_D1_SLOT}" != "A" && "${SRUTHI_ACTIVE_D1_SLOT}" != "B" ]]; then
+            echo "::error::SRUTHI_ACTIVE_D1_SLOT must be A or B when configured."
+            exit 1
+          fi
+
+          required_files=(
+            ".github/workflows/background-refresh.yml"
+            "cloudflare/wrangler.jsonc"
+            "cloudflare/src/worker.js"
+            "cloudflare/public/index.html"
+            "cloudflare/public/app.js"
+            "cloudflare/public/styles.css"
+            "cloudflare/scripts/render_wrangler_config.py"
+            "cloudflare/scripts/prepare_release.py"
+            "cloudflare/scripts/export_d1_sql.py"
+            "cloudflare/data/release-baseline.json"
+            "tools/masstamilan_refresh.py"
+            "server.py"
+          )
+
+          for file in "${required_files[@]}"; do
+            if [[ ! -e "$file" ]]; then
+              echo "::error::Required workflow file is missing: $file"
+              exit 1
+            fi
+          done
+
+      - name: Resolve run mode
+        run: |
+          set -euo pipefail
+          full_refresh="false"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "true" ]]; then
+            full_refresh="true"
+          fi
+          echo "SRUTHI_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
+
+      - name: Verify Cloudflare token and account access
+        run: |
+          set -euo pipefail
+          if ! npx wrangler whoami >/tmp/wrangler-whoami.txt 2>/tmp/wrangler-whoami.err; then
+            echo "::error::Wrangler authentication check failed. Ensure CLOUDFLARE_API_TOKEN includes Workers, D1, and account membership access, and CLOUDFLARE_ACCOUNT_ID is correct."
+            cat /tmp/wrangler-whoami.err
+            exit 1
+          fi
 
       - name: Select inactive D1 slot
         run: |
+          set -euo pipefail
           active="${SRUTHI_ACTIVE_D1_SLOT:-A}"
-          if [ "$active" = "A" ]; then
+          if [[ "$active" == "A" ]]; then
             target="B"
             db_id="${SRUTHI_D1_DB_B_ID}"
             db_name="${SRUTHI_D1_DB_B_NAME}"
@@ -63,67 +150,142 @@ jobs:
             db_id="${SRUTHI_D1_DB_A_ID}"
             db_name="${SRUTHI_D1_DB_A_NAME}"
           fi
-          test -n "$db_id"
-          test -n "$db_name"
+
           echo "TARGET_DB_ID=$db_id" >> "$GITHUB_ENV"
           echo "TARGET_DB_NAME=$db_name" >> "$GITHUB_ENV"
           echo "TARGET_SLOT=$target" >> "$GITHUB_ENV"
 
-      - name: Render temporary Wrangler config
+      - name: Render deployment Wrangler config
         run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "${GENERATED_WRANGLER_CONFIG}")"
           python cloudflare/scripts/render_wrangler_config.py \
             --input cloudflare/wrangler.jsonc \
-            --output "$RUNNER_TEMP/wrangler.deploy.jsonc" \
-            --database-id "$TARGET_DB_ID" \
-            --database-name "$TARGET_DB_NAME"
+            --output "${GENERATED_WRANGLER_CONFIG}" \
+            --database-id "${TARGET_DB_ID}" \
+            --database-name "${TARGET_DB_NAME}" \
+            --account-id "${CLOUDFLARE_ACCOUNT_ID}"
+
+          if [[ ! -f "${GENERATED_WRANGLER_CONFIG}" ]]; then
+            echo "::error::Rendered Wrangler config was not created."
+            exit 1
+          fi
+
+      - name: Validate rendered deployment config
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          config_path = Path(os.environ["GENERATED_WRANGLER_CONFIG"])
+          payload = json.loads(config_path.read_text(encoding="utf-8"))
+
+          main_path = Path(payload.get("main", ""))
+          assets_dir = Path((payload.get("assets") or {}).get("directory", ""))
+          d1_databases = payload.get("d1_databases") or []
+
+          if not main_path.is_file():
+            raise SystemExit(f"Rendered Wrangler main entry is invalid: {main_path}")
+          if not assets_dir.is_dir():
+            raise SystemExit(f"Rendered Wrangler assets directory is invalid: {assets_dir}")
+          if not d1_databases:
+            raise SystemExit("Rendered Wrangler config has no d1_databases entry.")
+          database = d1_databases[0]
+          if not database.get("database_id") or not database.get("database_name"):
+            raise SystemExit("Rendered Wrangler config is missing D1 database_id or database_name.")
+
+          print({
+            "main": str(main_path),
+            "assets": str(assets_dir),
+            "database_name": database["database_name"],
+            "database_id": database["database_id"],
+          })
+          PY
 
       - name: Refresh catalog from MassTamilan
         run: |
-          args=()
-          if [ "${{ github.event.inputs.full_refresh || 'false' }}" = "true" ]; then
+          set -euo pipefail
+          workers="$(python - <<'PY'
+          import os
+          print(max(4, os.cpu_count() or 4))
+          PY
+          )"
+          batch_size="$(( workers * 4 ))"
+          args=(--workers "${workers}" --batch-size "${batch_size}")
+          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
             args+=(--full)
           fi
           python tools/masstamilan_refresh.py "${args[@]}"
 
+      - name: Validate refreshed local catalog files
+        run: |
+          set -euo pipefail
+          if [[ ! -f data/sruthi.db ]]; then
+            echo "::error::Expected data/sruthi.db to exist after refresh."
+            exit 1
+          fi
+          if [[ ! -s data/sruthi.db ]]; then
+            echo "::error::data/sruthi.db exists but is empty."
+            exit 1
+          fi
+
       - name: Validate catalog and build release seed
         run: |
+          set -euo pipefail
           python cloudflare/scripts/prepare_release.py \
             --db data/sruthi.db \
             --seed cloudflare/data/seed.sql \
             --baseline cloudflare/data/release-baseline.json \
-            --manifest "$RUNNER_TEMP/release-manifest.json" \
-            --duckdb-path "$RUNNER_TEMP/release-check.duckdb"
+            --manifest "${RELEASE_MANIFEST}" \
+            --duckdb-path "${RELEASE_DUCKDB}"
+
+          if [[ ! -f cloudflare/data/seed.sql ]]; then
+            echo "::error::Release seed was not generated."
+            exit 1
+          fi
+          if [[ ! -s cloudflare/data/seed.sql ]]; then
+            echo "::error::Release seed was generated but is empty."
+            exit 1
+          fi
+          if [[ ! -f "${RELEASE_MANIFEST}" ]]; then
+            echo "::error::Release manifest was not generated."
+            exit 1
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: sruthi-release
+          if-no-files-found: error
           path: |
             cloudflare/data/seed.sql
-            ${{ runner.temp }}/release-manifest.json
+            ${{ env.RELEASE_MANIFEST }}
 
       - name: Import release into inactive D1 slot
         run: |
-          npx wrangler d1 execute "$TARGET_DB_NAME" \
+          set -euo pipefail
+          npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
-            --file ./cloudflare/data/seed.sql \
-            --config "$RUNNER_TEMP/wrangler.deploy.jsonc"
+            --file cloudflare/data/seed.sql \
+            --config "${GENERATED_WRANGLER_CONFIG}"
 
       - name: Validate inactive D1 slot
         run: |
-          npx wrangler d1 execute "$TARGET_DB_NAME" \
+          set -euo pipefail
+          npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
             --command "SELECT COUNT(*) AS count FROM albums;" \
-            --config "$RUNNER_TEMP/wrangler.deploy.jsonc" \
-            --json > "$RUNNER_TEMP/albums.json"
-          npx wrangler d1 execute "$TARGET_DB_NAME" \
+            --config "${GENERATED_WRANGLER_CONFIG}" \
+            --json > /tmp/albums.json
+          npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
             --command "SELECT COUNT(*) AS count FROM songs;" \
-            --config "$RUNNER_TEMP/wrangler.deploy.jsonc" \
-            --json > "$RUNNER_TEMP/songs.json"
+            --config "${GENERATED_WRANGLER_CONFIG}" \
+            --json > /tmp/songs.json
           python - <<'PY'
           import json
-          import os
           from pathlib import Path
 
           def extract_count(path):
@@ -139,9 +301,8 @@ jobs:
                 stack.extend(item)
             raise SystemExit(f"No count field found in {path}")
 
-          runner_temp = Path(os.environ["RUNNER_TEMP"])
-          album_count = extract_count(runner_temp / "albums.json")
-          song_count = extract_count(runner_temp / "songs.json")
+          album_count = extract_count("/tmp/albums.json")
+          song_count = extract_count("/tmp/songs.json")
           if album_count <= 0 or song_count <= 0:
             raise SystemExit(f"Remote D1 validation failed: albums={album_count}, songs={song_count}")
           print({"albumCount": album_count, "songCount": song_count})
@@ -149,22 +310,24 @@ jobs:
 
       - name: Deploy Worker after successful import and validation
         run: |
-          npx wrangler deploy --config "$RUNNER_TEMP/wrangler.deploy.jsonc"
+          set -euo pipefail
+          npx wrangler deploy --config "${GENERATED_WRANGLER_CONFIG}"
 
       - name: Mark deployed D1 slot as active
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           if gh api "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" >/dev/null 2>&1; then
             gh api \
               --method PATCH \
               "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" \
               -f name=SRUTHI_ACTIVE_D1_SLOT \
-              -f value="$TARGET_SLOT"
+              -f value="${TARGET_SLOT}"
           else
             gh api \
               --method POST \
               "repos/${GITHUB_REPOSITORY}/actions/variables" \
               -f name=SRUTHI_ACTIVE_D1_SLOT \
-              -f value="$TARGET_SLOT"
+              -f value="${TARGET_SLOT}"
           fi
