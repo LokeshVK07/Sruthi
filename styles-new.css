@@ -189,6 +189,7 @@ dt {
 
 .mobile-menu-button,
 .mobile-menu-backdrop,
+.queue-backdrop,
 .mobile-collection-bar,
 .mobile-player-minimize,
 .mobile-mini-player,
@@ -197,6 +198,10 @@ dt {
 }
 
 .mobile-menu-backdrop[hidden] {
+  display: none !important;
+}
+
+.queue-backdrop[hidden] {
   display: none !important;
 }
 
@@ -552,6 +557,15 @@ dd {
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
 }
 
+.queue-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  background: rgba(3, 8, 18, 0.45);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
 .queue-panel[hidden] {
   display: none !important;
 }
@@ -650,14 +664,48 @@ dd {
 }
 
 @media (max-width: 720px) {
+  body.queue-panel-open {
+    overflow: hidden;
+  }
+
+  .queue-backdrop {
+    display: block;
+  }
+
   .queue-panel {
-    position: absolute;
+    position: fixed;
+    left: 14px;
+    right: 14px;
     top: auto;
-    bottom: calc(100% + 12px);
-    right: 0;
-    left: auto;
-    width: min(360px, calc(100vw - 28px));
-    max-height: min(320px, 52vh);
+    bottom: max(14px, env(safe-area-inset-bottom));
+    width: auto;
+    max-height: min(46vh, 420px);
+    z-index: 3001;
+    border-radius: 24px;
+    padding: 14px;
+  }
+
+  .queue-panel-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding-bottom: 4px;
+    background: rgba(7, 15, 29, 0.94);
+  }
+
+  .queue-list {
+    max-height: min(34vh, 320px);
+    overflow: auto;
+    padding-right: 2px;
+  }
+
+  .queue-row {
+    padding: 10px 12px;
+    border-radius: 18px;
+  }
+
+  .queue-copy strong {
+    font-size: 0.92rem;
   }
 }
 

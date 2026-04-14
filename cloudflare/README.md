@@ -183,6 +183,23 @@ npx wrangler dev
 npx wrangler deploy
 ```
 
+That command only deploys the Worker and current static assets.
+
+If you want the live Cloudflare site to match the full current localhost state, including the latest local frontend files and the current local SQLite catalog, use:
+
+```bash
+python3 /Users/lokesh/Project_1/tools/deploy_localhost_to_cloudflare.py
+```
+
+That local release script will:
+
+- sync the current root frontend bundle into [public](/Users/lokesh/Project_1/cloudflare/public)
+- build a validated D1 seed from [data/sruthi.db](/Users/lokesh/Project_1/data/sruthi.db)
+- import it into the inactive D1 slot
+- validate the remote slot counts against the local release manifest
+- deploy the Worker and static assets together
+- update `SRUTHI_ACTIVE_D1_SLOT` only after success
+
 ## GitHub Actions Background Refresh
 
 The repository now includes a safe background refresh workflow at:

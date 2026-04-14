@@ -68,6 +68,7 @@ const nodes = {
   queueCount: document.querySelector("#queue-count"),
   queueList: document.querySelector("#queue-list"),
   queueClose: document.querySelector("#queue-close"),
+  queueBackdrop: document.querySelector("#queue-backdrop"),
   mobileModeToggle: document.querySelector("#mobile-mode-toggle"),
   mobileSpeedToggle: document.querySelector("#mobile-speed-toggle"),
   mobilePlayerMinimize: document.querySelector("#mobile-player-minimize"),
@@ -741,6 +742,7 @@ function closeSongContextMenu() {
 
 function setQueuePanelOpen(nextOpen) {
   queuePanelOpen = Boolean(nextOpen);
+  document.body.classList.toggle("queue-panel-open", queuePanelOpen);
   renderQueuePanel();
 }
 
@@ -806,6 +808,7 @@ function renderQueuePanel() {
   nodes.queueToggle.title = state.queue.length ? `Show queue (${state.queue.length})` : "Show queue";
   nodes.queueToggle.classList.toggle("is-open", queuePanelOpen);
   nodes.queuePanel.hidden = !queuePanelOpen;
+  if (nodes.queueBackdrop) nodes.queueBackdrop.hidden = !queuePanelOpen || !mobileMediaQuery.matches;
   nodes.queueList.innerHTML = "";
 
   const fragment = document.createDocumentFragment();
@@ -1773,6 +1776,10 @@ function bindEvents() {
 
   nodes.queueClose?.addEventListener("click", (event) => {
     event.stopPropagation();
+    setQueuePanelOpen(false);
+  });
+
+  nodes.queueBackdrop?.addEventListener("click", () => {
     setQueuePanelOpen(false);
   });
 

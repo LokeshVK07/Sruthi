@@ -37,12 +37,19 @@ Start here:
 - [cloudflare/README.md](/Users/lokesh/Project_1/cloudflare/README.md)
 - [cloudflare/wrangler.jsonc](/Users/lokesh/Project_1/cloudflare/wrangler.jsonc)
 - [cloudflare/scripts/export_d1_sql.py](/Users/lokesh/Project_1/cloudflare/scripts/export_d1_sql.py)
+- [tools/deploy_localhost_to_cloudflare.py](/Users/lokesh/Project_1/tools/deploy_localhost_to_cloudflare.py)
 
 This path uses:
 
 - Cloudflare Workers
 - Cloudflare static assets
 - Cloudflare D1
+
+To deploy the full current localhost-visible state safely, use:
+
+```bash
+python3 /Users/lokesh/Project_1/tools/deploy_localhost_to_cloudflare.py
+```
 
 ## Safe Background Refresh
 
