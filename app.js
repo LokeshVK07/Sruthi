@@ -485,8 +485,12 @@ function cacheSongs(songs) {
   });
 }
 
+function getContext() {
+  return state.songs.map(s => s.id);
+}
+
 function rebuildShuffleOrder() {
-  const ids = state.songs.map((song) => song.id).filter(Boolean);
+  const ids = getContext().filter(Boolean);
   if (!ids.length) {
     state.shuffleOrder = [];
     state.shuffleCursor = -1;
@@ -504,7 +508,7 @@ function rebuildShuffleOrder() {
 
 function ensureShuffleCursor() {
   if (state.playbackMode !== "shuffle") return;
-  const songIds = state.songs.map((song) => song.id);
+  const songIds = getContext();
   if (
     !state.shuffleOrder.length ||
     state.shuffleOrder.length !== songIds.length ||
@@ -525,9 +529,6 @@ function setPlaybackMode(mode) {
     ensureShuffleCursor();
   }
   nodes.audioPlayer.loop = state.playbackMode === "loop";
-  if (state.selectedSongId && state.currentView === "playlist") {
-    syncQueueFromPlaylistSelection(state.selectedSongId);
-  }
   updateTransportState();
 }
 
@@ -564,27 +565,6 @@ function currentCollectionTitle() {
     return playlist?.official ? officialPlaylistDisplayName(playlist.name) : playlist?.name || "Playlist";
   }
   return "Song Collection";
-}
-
-function syncQueueFromPlaylistSelection(songId) {
-  if (state.currentView !== "playlist") return;
-  if (state.playbackMode === "shuffle") {
-    ensureShuffleCursor();
-    state.queue = state.shuffleOrder
-      .slice(Math.max(0, state.shuffleCursor + 1))
-      .filter((id) => id && id !== songId);
-    saveQueue();
-    renderQueuePanel();
-    return;
-  }
-  const currentIndex = state.songs.findIndex((song) => song.id === songId);
-  if (currentIndex < 0) return;
-  state.queue = state.songs
-    .slice(currentIndex + 1)
-    .map((song) => song.id)
-    .filter(Boolean);
-  saveQueue();
-  renderQueuePanel();
 }
 
 function renderMobilePlayerPlaylistPicker() {
@@ -828,32 +808,64 @@ function renderQueuePanel() {
   nodes.queuePanel.hidden = !queuePanelOpen;
   nodes.queueList.innerHTML = "";
 
-  if (!state.queue.length) {
+  const fragment = document.createDocumentFragment();
+
+  if (state.queue.length) {
+    const queueHeader = document.createElement("div");
+    queueHeader.className = "queue-section-header";
+    queueHeader.textContent = "Up Next";
+    fragment.append(queueHeader);
+    
+    songs.forEach((entry, index) => {
+      const song = entry.song;
+      const row = document.createElement("div");
+      row.className = "queue-row is-manual";
+      row.dataset.songId = entry.id;
+      row.innerHTML = `
+        <button class="queue-main" type="button">
+          <span class="queue-copy">
+            <strong>${song?.title || entry.id}</strong>
+          </span>
+        </button>
+        <button class="queue-remove" type="button" aria-label="Remove from queue">×</button>
+      `;
+      fragment.append(row);
+    });
+  }
+
+  const contextIds = getContext();
+  const currentIndex = contextIds.indexOf(state.selectedSongId);
+  const upcomings = currentIndex >= 0 ? contextIds.slice(currentIndex + 1) : contextIds;
+  
+  if (upcomings.length) {
+    const contextHeader = document.createElement("div");
+    contextHeader.className = "queue-section-header";
+    contextHeader.textContent = "Next From Context";
+    fragment.append(contextHeader);
+
+    upcomings.forEach((id) => {
+      const song = state.songCache.get(id);
+      const row = document.createElement("div");
+      row.className = "queue-row is-context";
+      row.dataset.songId = id;
+      row.innerHTML = `
+        <button class="queue-main" type="button">
+          <span class="queue-copy">
+            <strong>${song?.title || id}</strong>
+          </span>
+        </button>
+      `;
+      fragment.append(row);
+    });
+  }
+
+  if (!state.queue.length && !upcomings.length) {
     const empty = document.createElement("div");
     empty.className = "queue-empty";
     empty.textContent = "No songs in queue yet.";
-    nodes.queueList.append(empty);
-    positionQueuePanel();
-    return;
+    fragment.append(empty);
   }
 
-  const fragment = document.createDocumentFragment();
-  songs.forEach((entry, index) => {
-    const song = entry.song;
-    const row = document.createElement("div");
-    row.className = "queue-row";
-    row.dataset.songId = entry.id;
-    row.innerHTML = `
-      <button class="queue-main" type="button">
-        <span class="queue-index">${index + 1}</span>
-        <span class="queue-copy">
-          <strong>${song?.title || entry.id}</strong>
-        </span>
-      </button>
-      <button class="queue-remove" type="button" aria-label="Remove from queue">×</button>
-    `;
-    fragment.append(row);
-  });
   nodes.queueList.append(fragment);
   positionQueuePanel();
 }
@@ -900,10 +912,11 @@ function updateTransportState() {
     nodes.seekBar.value = Number.isFinite(duration) && duration > 0 ? String((currentTime / duration) * 100) : "0";
   }
 
-  const index = selectedSongIndex();
-  const hasSongs = state.songs.length > 0;
+  const ctx = getContext();
+  const hasSongs = ctx.length > 0;
+  const queueHasSongs = state.queue.length > 0;
   nodes.previousTrack.disabled = !hasSongs;
-  nodes.nextTrack.disabled = !hasSongs;
+  nodes.nextTrack.disabled = !(hasSongs || queueHasSongs);
   nodes.favoriteToggle.classList.toggle("is-active", isFavorite(state.selectedSongId));
   nodes.favoriteToggle.textContent = mobileMediaQuery.matches
     ? (isFavorite(state.selectedSongId) ? "♥" : "♡")
@@ -925,10 +938,6 @@ function updateTransportState() {
   syncVolumeUi();
   syncMiniPlayerProgress();
 
-  if (!hasSongs || index < 0) {
-    nodes.previousTrack.disabled = true;
-    nodes.nextTrack.disabled = true;
-  }
   renderTransportLabels();
   syncMobilePlayerUi();
   syncMediaSession();
@@ -1179,6 +1188,7 @@ function renderSongs() {
   renderFavorites();
   renderPlaylists();
   renderSelectedSong();
+  renderQueuePanel();
 }
 
 function renderSelectedSong() {
@@ -1297,7 +1307,7 @@ async function selectSong(songId, { autoplay = false } = {}) {
   if (state.playbackMode === "shuffle") {
     ensureShuffleCursor();
   }
-  syncQueueFromPlaylistSelection(songId);
+  renderQueuePanel();
   renderSongs();
   if (mobileMediaQuery.matches) {
     setMobilePlayerExpanded(true);
@@ -1309,8 +1319,9 @@ async function selectSong(songId, { autoplay = false } = {}) {
 }
 
 function getNextIndex() {
-  if (!state.songs.length) return -1;
-  const currentIndex = selectedSongIndex();
+  const ctx = getContext();
+  if (!ctx.length) return -1;
+  const currentIndex = ctx.indexOf(state.selectedSongId);
   if (currentIndex < 0) return 0;
   if (state.playbackMode === "loop") return currentIndex;
   if (state.playbackMode === "shuffle") {
@@ -1318,26 +1329,27 @@ function getNextIndex() {
     const nextCursor = state.shuffleCursor + 1;
     if (nextCursor < state.shuffleOrder.length) {
       const nextId = state.shuffleOrder[nextCursor];
-      return state.songs.findIndex((song) => song.id === nextId);
+      return ctx.indexOf(nextId);
     }
     if (state.playbackMode === "repeat") return currentIndex;
-    if (state.songs.length > 1) {
+    if (ctx.length > 1) {
       rebuildShuffleOrder();
       if (state.playbackMode === "shuffle" && state.shuffleOrder.length) {
         const nextId = state.shuffleOrder[Math.min(1, state.shuffleOrder.length - 1)];
-        return state.songs.findIndex((song) => song.id === nextId);
+        return ctx.indexOf(nextId);
       }
     }
     return state.playbackMode === "repeat" ? 0 : -1;
   }
-  if (currentIndex + 1 < state.songs.length) return currentIndex + 1;
+  if (currentIndex + 1 < ctx.length) return currentIndex + 1;
   if (state.playbackMode === "repeat") return 0;
   return -1;
 }
 
 function getPrevIndex() {
-  if (!state.songs.length) return -1;
-  const currentIndex = selectedSongIndex();
+  const ctx = getContext();
+  if (!ctx.length) return -1;
+  const currentIndex = ctx.indexOf(state.selectedSongId);
   if (currentIndex < 0) return 0;
   if (state.playbackMode === "loop") return currentIndex;
   if (state.playbackMode === "shuffle") {
@@ -1345,17 +1357,18 @@ function getPrevIndex() {
     const prevCursor = state.shuffleCursor - 1;
     if (prevCursor >= 0) {
       const prevId = state.shuffleOrder[prevCursor];
-      return state.songs.findIndex((song) => song.id === prevId);
+      return ctx.indexOf(prevId);
     }
     return state.playbackMode === "repeat" ? currentIndex : -1;
   }
   if (currentIndex > 0) return currentIndex - 1;
-  if (state.playbackMode === "repeat") return state.songs.length - 1;
+  if (state.playbackMode === "repeat") return ctx.length - 1;
   return -1;
 }
 
 function nextSongByMode(direction = 1) {
-  if (!state.songs.length) return null;
+  const ctx = getContext();
+  if (!ctx.length) return null;
   if (direction > 0 && state.queue.length) {
     const nextQueuedId = state.queue.shift();
     saveQueue();
@@ -1364,7 +1377,8 @@ function nextSongByMode(direction = 1) {
   }
   const targetIndex = direction > 0 ? getNextIndex() : getPrevIndex();
   if (targetIndex < 0) return null;
-  return state.songs[targetIndex] || null;
+  const nextId = ctx[targetIndex];
+  return state.songCache.get(nextId) || null;
 }
 
 async function handleTrackEnd() {
@@ -1772,6 +1786,16 @@ function bindEvents() {
       return;
     }
     setQueuePanelOpen(false);
+    
+    if (row.classList.contains("is-manual")) {
+      const queueIndex = state.queue.indexOf(songId);
+      if (queueIndex >= 0) {
+        state.queue = state.queue.slice(queueIndex + 1);
+        saveQueue();
+        renderQueuePanel();
+      }
+    }
+    
     await selectSong(songId, { autoplay: true });
   });
 
