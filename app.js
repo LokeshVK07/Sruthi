@@ -108,9 +108,6 @@ let mobilePlayerExpanded = false;
 let queuePanelOpen = false;
 let activeSongMenuId = null;
 const mobileMediaQuery = window.matchMedia("(max-width: 720px)");
-let audioContext = null;
-let mediaSourceNode = null;
-let gainNode = null;
 let mediaPositionRaf = null;
 let toastTimer = null;
 
@@ -422,45 +419,9 @@ function bindMediaSessionHandlers() {
   setupKeyboardShortcuts(playerAPI);
 }
 
-async function ensureAudioPipeline() {
-  if (gainNode) {
-    if (audioContext?.state === "suspended") {
-      try {
-        await audioContext.resume();
-      } catch (_) {
-        // ignore resume failures and keep fallback volume path
-      }
-    }
-    return;
-  }
-
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return;
-
-  try {
-    audioContext = new AudioContextClass();
-    mediaSourceNode = audioContext.createMediaElementSource(nodes.audioPlayer);
-    gainNode = audioContext.createGain();
-    mediaSourceNode.connect(gainNode);
-    gainNode.connect(audioContext.destination);
-    gainNode.gain.value = clampVolume(state.volumeLevel);
-    if (audioContext.state === "suspended") {
-      await audioContext.resume();
-    }
-  } catch (_) {
-    audioContext = null;
-    mediaSourceNode = null;
-    gainNode = null;
-  }
-}
-
 async function applyVolume(nextVolume) {
   state.volumeLevel = clampVolume(nextVolume);
   nodes.audioPlayer.volume = state.volumeLevel;
-  await ensureAudioPipeline();
-  if (gainNode) {
-    gainNode.gain.value = state.volumeLevel;
-  }
   syncVolumeUi();
 }
 
@@ -1287,7 +1248,6 @@ async function playCurrentSong() {
   const song = selectedSong();
   if (!song || !playbackUrlForSong(song)) return;
   try {
-    await ensureAudioPipeline();
     await waitForPlayableAudio();
     await nodes.audioPlayer.play();
     nodes.playToggle.textContent = "Pause";

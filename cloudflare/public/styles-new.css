@@ -980,6 +980,245 @@ dd {
   font-size: 1rem;
 }
 
+@media (min-width: 1000px) {
+  .app-shell {
+    grid-template-columns: 286px minmax(0, 1fr);
+    gap: 16px;
+    padding: 16px;
+  }
+
+  .side-rail {
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .brand-block h1 {
+    font-size: clamp(1.7rem, 2.5vw, 2.2rem);
+  }
+
+  .brand-copy {
+    font-size: 0.8rem;
+  }
+
+  .kicker,
+  .stat-card span,
+  dt {
+    font-size: 0.64rem;
+  }
+
+  .stats-panel {
+    gap: 8px;
+  }
+
+  .stat-card {
+    padding: 8px 10px;
+    border-radius: 12px;
+  }
+
+  .stat-card strong {
+    font-size: 0.82rem;
+  }
+
+  .rail-button,
+  .load-more-button,
+  .library-link {
+    min-height: 38px;
+    font-size: 0.9rem;
+  }
+
+  .favorites-card,
+  .playlists-card {
+    gap: 10px;
+    padding: 12px;
+    border-radius: 16px;
+  }
+
+  .playlist-form {
+    gap: 6px;
+  }
+
+  .favorites-sort-wrap select,
+  .speed-wrap select,
+  .playlist-pick,
+  .playlist-form input,
+  .playlist-form button,
+  .search-wrap input,
+  .select-wrap select {
+    padding: 8px 11px;
+    font-size: 0.88rem;
+  }
+
+  .favorite-row,
+  .playlist-row {
+    padding: 5px 6px;
+    border-radius: 10px;
+  }
+
+  .favorite-title,
+  .playlist-title {
+    font-size: 0.73rem;
+  }
+
+  .favorite-detail,
+  .playlist-detail {
+    font-size: 0.58rem;
+  }
+
+  .library-stage {
+    gap: 14px;
+  }
+
+  .toolbar-card,
+  .catalog-card,
+  .player-bar {
+    padding: 16px;
+    border-radius: 24px;
+  }
+
+  .player-bar {
+    gap: 14px;
+  }
+
+  .player-bar-main {
+    grid-template-columns: 76px minmax(0, 1fr) minmax(180px, 250px);
+    gap: 14px;
+  }
+
+  .player-avatar-wrap {
+    width: 76px;
+    height: 76px;
+    padding: 5px;
+  }
+
+  .player-copy h3 {
+    font-size: clamp(1.15rem, 1.8vw, 1.7rem);
+  }
+
+  .player-copy p,
+  dd {
+    font-size: 0.84rem;
+  }
+
+  .player-meta {
+    gap: 8px;
+  }
+
+  .player-meta div {
+    padding: 10px;
+    border-radius: 16px;
+  }
+
+  dt {
+    margin-bottom: 6px;
+  }
+
+  .player-actions,
+  .player-options {
+    gap: 8px;
+  }
+
+  .play-toggle {
+    min-width: 92px;
+    min-height: 40px;
+    font-size: 0.98rem;
+  }
+
+  .transport-button {
+    min-width: 72px;
+    min-height: 40px;
+    font-size: 0.86rem;
+  }
+
+  .heart-button,
+  .queue-button {
+    min-width: 44px;
+    width: 44px;
+    font-size: 1.05rem;
+  }
+
+  .seek-shell {
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    gap: 10px;
+  }
+
+  .time-stamp {
+    font-size: 0.8rem;
+  }
+
+  .volume-wrap {
+    min-width: min(100%, 210px);
+    padding: 7px 10px;
+    gap: 8px;
+  }
+
+  .volume-label,
+  .volume-value {
+    font-size: 0.74rem;
+  }
+
+  .toolbar-card {
+    grid-template-columns: minmax(0, 1fr) 180px;
+    gap: 10px;
+  }
+
+  .panel-head {
+    margin-bottom: 14px;
+  }
+
+  .panel-head h2 {
+    font-size: 1.28rem;
+  }
+
+  .song-list {
+    gap: 8px;
+  }
+
+  .song-row {
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 16px;
+  }
+
+  .song-title {
+    font-size: 0.88rem;
+  }
+
+  .song-detail,
+  .song-year {
+    font-size: 0.74rem;
+    margin-top: 3px;
+  }
+
+  .song-subdetail {
+    font-size: 0.65rem;
+    margin-top: 2px;
+  }
+
+  .song-side {
+    gap: 10px;
+  }
+
+  .song-actions {
+    gap: 6px;
+  }
+
+  .song-menu-toggle {
+    width: 30px;
+    height: 30px;
+    font-size: 1rem;
+  }
+
+  .playlist-pick {
+    max-width: 136px;
+    font-size: 0.8rem;
+  }
+
+  .song-remove {
+    min-width: 64px;
+    font-size: 0.78rem;
+  }
+}
+
 .song-context-label {
   flex: 1;
 }
