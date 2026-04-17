@@ -1208,8 +1208,11 @@ function renderSelectedSong() {
   nodes.nowTitle.textContent = song.title;
   nodes.nowArtist.textContent = song.artist;
   nodes.nowMovie.textContent = song.movie || "-";
+  nodes.nowMovie.title = song.movie || "";
   nodes.nowYear.textContent = song.year || "-";
+  nodes.nowYear.title = song.year ? String(song.year) : "";
   nodes.nowComposer.textContent = song.composer || "-";
+  nodes.nowComposer.title = song.composer || "";
   if (nodes.playerAvatar) nodes.playerAvatar.src = artworkUrlForSong(song);
   if (nodes.mobileMiniArtImage) nodes.mobileMiniArtImage.src = artworkUrlForSong(song);
   renderMobilePlayerPlaylistPicker();
