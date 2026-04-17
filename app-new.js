@@ -110,6 +110,7 @@ let activeSongMenuId = null;
 const mobileMediaQuery = window.matchMedia("(max-width: 720px)");
 let mediaPositionRaf = null;
 let toastTimer = null;
+const PLAYBACK_DEBUG_PREFIX = "[Sruthi Playback]";
 
 function sanitizeText(value) {
   return String(value ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
@@ -186,6 +187,14 @@ function showToast(message) {
     nodes.appToast.classList.remove("is-visible");
     nodes.appToast.classList.add("hidden");
   }, 1800);
+}
+
+function logPlaybackDebug(event, details = {}) {
+  try {
+    console.info(PLAYBACK_DEBUG_PREFIX, event, details);
+  } catch (_) {
+    // ignore console failures
+  }
 }
 
 function syncMobilePlayerUi() {
@@ -1194,6 +1203,11 @@ function renderSelectedSong() {
   if (playbackUrl) {
     const absolute = new URL(playbackUrl, window.location.origin).toString();
     if (nodes.audioPlayer.src !== absolute) {
+      logPlaybackDebug("source-assigned", {
+        songId: song.id,
+        title: song.title,
+        src: playbackUrl,
+      });
       nodes.audioPlayer.src = playbackUrl;
       nodes.audioPlayer.load();
     }
@@ -1249,9 +1263,26 @@ async function playCurrentSong() {
   if (!song || !playbackUrlForSong(song)) return;
   try {
     await waitForPlayableAudio();
+    logPlaybackDebug("play-attempt", {
+      songId: song.id,
+      title: song.title,
+      src: nodes.audioPlayer.currentSrc || playbackUrlForSong(song),
+      readyState: nodes.audioPlayer.readyState,
+    });
     await nodes.audioPlayer.play();
+    logPlaybackDebug("play-succeeded", {
+      songId: song.id,
+      title: song.title,
+      currentTime: nodes.audioPlayer.currentTime,
+    });
     nodes.playToggle.textContent = "Pause";
-  } catch (_) {
+  } catch (error) {
+    logPlaybackDebug("play-failed", {
+      songId: song.id,
+      title: song.title,
+      message: error?.message || String(error),
+      name: error?.name || "Error",
+    });
     nodes.playToggle.textContent = "Play";
   }
   setPlaybackStatus("");
@@ -1275,7 +1306,6 @@ async function selectSong(songId, { autoplay = false } = {}) {
   if (mobileMediaQuery.matches) {
     setMobilePlayerExpanded(true);
   }
-  await new Promise((resolve) => window.requestAnimationFrame(() => resolve()));
   const index = selectedSongIndex();
   prefetchSongIds([songId, state.songs[index - 1]?.id, state.songs[index + 1]?.id]);
   if (autoplay) await playCurrentSong();
@@ -1345,12 +1375,25 @@ function nextSongByMode(direction = 1) {
 }
 
 async function handleTrackEnd() {
+  logPlaybackDebug("audio-ended", {
+    songId: state.selectedSongId,
+    title: selectedSong()?.title || "",
+  });
   const nextSong = nextSongByMode(1);
   if (!nextSong) {
+    logPlaybackDebug("next-track-resolved", {
+      resolved: false,
+      reason: "no-next-track",
+    });
     nodes.audioPlayer.pause();
     updateTransportState();
     return;
   }
+  logPlaybackDebug("next-track-resolved", {
+    resolved: true,
+    nextSongId: nextSong.id,
+    nextTitle: nextSong.title,
+  });
   await selectSong(nextSong.id, { autoplay: true });
 }
 
