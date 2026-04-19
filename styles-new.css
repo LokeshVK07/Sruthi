@@ -653,7 +653,7 @@ dd {
 
 .queue-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   padding: 8px 10px;
@@ -686,7 +686,7 @@ dd {
 
 .queue-main {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   border: 0;

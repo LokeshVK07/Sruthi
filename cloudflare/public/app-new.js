@@ -924,11 +924,13 @@ function renderQueuePanel() {
       row.className = "queue-row is-context";
       row.dataset.songId = id;
       row.innerHTML = `
-        <button class="queue-main" type="button">
+        <div class="drag-handle" aria-hidden="true">☰</div>
+        <button class="queue-main" type="button" style="grid-column: 2 / -2;">
           <span class="queue-copy">
             <strong>${song?.title || id}</strong>
           </span>
         </button>
+        <button class="queue-remove" type="button" aria-label="Remove from queue">×</button>
       `;
       fragment.append(row);
     });
@@ -948,15 +950,16 @@ function renderQueuePanel() {
     queueSortable = new Sortable(nodes.queueList, {
       animation: 150,
       handle: '.drag-handle',
-      draggable: '.is-manual',
+      draggable: '.queue-row',
       ghostClass: 'sortable-ghost',
       onEnd: function (evt) {
         if (evt.oldIndex === evt.newIndex) return;
-        const domNodes = Array.from(nodes.queueList.querySelectorAll('.is-manual'));
+        const domNodes = Array.from(nodes.queueList.querySelectorAll('.queue-row'));
         const newQueue = domNodes.map(el => el.dataset.songId);
         state.queue = newQueue;
         saveQueue();
         renderSongs();
+        renderQueuePanel();
       }
     });
   }
