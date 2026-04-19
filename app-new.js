@@ -881,14 +881,19 @@ function renderQueuePanel() {
     }
   }
 
-  nodes.queueList.innerHTML = "";
-  const fragment = document.createDocumentFragment();
-
+  let manualList = nodes.queueList.querySelector('.manual-list');
+  if (!manualList) {
+    manualList = document.createElement("div");
+    manualList.className = "manual-list queue-group";
+    nodes.queueList.append(manualList);
+  }
+  manualList.innerHTML = "";
+  
   if (state.queue.length) {
     const queueHeader = document.createElement("div");
-    queueHeader.className = "queue-section-header";
+    queueHeader.className = "queue-section-header manual-header";
     queueHeader.textContent = "Up Next";
-    fragment.append(queueHeader);
+    manualList.append(queueHeader);
     
     songs.forEach((entry, index) => {
       const song = entry.song;
@@ -897,26 +902,33 @@ function renderQueuePanel() {
       row.dataset.songId = entry.id;
       row.innerHTML = `
         <div class="drag-handle" aria-hidden="true">☰</div>
-        <button class="queue-main" type="button" style="grid-column: 2 / -2;">
+        <button class="queue-main" type="button" style="grid-column: 2 / 2;">
           <span class="queue-copy">
             <strong>${song?.title || entry.id}</strong>
           </span>
         </button>
         <button class="queue-remove" type="button" aria-label="Remove from queue">×</button>
       `;
-      fragment.append(row);
+      manualList.append(row);
     });
   }
 
   const contextIds = getContext();
   const currentIndex = contextIds.indexOf(state.selectedSongId);
   const upcomings = currentIndex >= 0 ? contextIds.slice(currentIndex + 1) : contextIds;
-  
+  let contextList = nodes.queueList.querySelector('.context-list');
+  if (!contextList) {
+    contextList = document.createElement("div");
+    contextList.className = "context-list queue-group";
+    nodes.queueList.append(contextList);
+  }
+  contextList.innerHTML = "";
+
   if (upcomings.length) {
     const contextHeader = document.createElement("div");
-    contextHeader.className = "queue-section-header";
+    contextHeader.className = "queue-section-header context-header";
     contextHeader.textContent = "Next From Context";
-    fragment.append(contextHeader);
+    contextList.append(contextHeader);
 
     upcomings.forEach((id) => {
       const song = state.songCache.get(id);
@@ -925,51 +937,63 @@ function renderQueuePanel() {
       row.dataset.songId = id;
       row.innerHTML = `
         <div class="drag-handle" aria-hidden="true">☰</div>
-        <button class="queue-main" type="button" style="grid-column: 2 / -2;">
+        <button class="queue-main" type="button" style="grid-column: 2 / 2;">
           <span class="queue-copy">
             <strong>${song?.title || id}</strong>
           </span>
         </button>
-        <button class="queue-remove" type="button" aria-label="Remove from queue">×</button>
+        <button class="queue-remove" type="button" aria-label="Remove from queue" style="visibility: hidden;">×</button>
       `;
-      fragment.append(row);
+      contextList.append(row);
     });
   }
+
+  const oldEmpty = nodes.queueList.querySelector('.queue-empty');
+  if (oldEmpty) oldEmpty.remove();
 
   if (!state.queue.length && !upcomings.length) {
     const empty = document.createElement("div");
     empty.className = "queue-empty";
     empty.textContent = "No songs in queue yet.";
-    fragment.append(empty);
+    nodes.queueList.append(empty);
   }
 
-  nodes.queueList.append(fragment);
   positionQueuePanel();
 
-  if (window.Sortable && queuePanelOpen && !queueSortable) {
-    queueSortable = new Sortable(nodes.queueList, {
-      animation: 150,
-      handle: '.drag-handle',
-      draggable: '.queue-row',
-      ghostClass: 'sortable-ghost',
-      onEnd: function (evt) {
-        if (evt.oldIndex === evt.newIndex) return;
-        const domNodes = Array.from(nodes.queueList.querySelectorAll('.queue-row'));
-        const newQueue = domNodes.map(el => el.dataset.songId);
-        state.queue = newQueue;
-        saveQueue();
-        renderSongs();
-        renderQueuePanel();
-      }
-    });
+  if (window.Sortable && queuePanelOpen) {
+    if (!window.manualSortable && manualList) {
+      window.manualSortable = new Sortable(manualList, {
+        group: 'queue',
+        animation: 150,
+        handle: '.drag-handle',
+        draggable: '.queue-row',
+        ghostClass: 'sortable-ghost',
+        onEnd: function () {
+          const domNodes = Array.from(manualList.querySelectorAll('.queue-row'));
+          state.queue = domNodes.map(el => el.dataset.songId);
+          saveQueue();
+          renderSongs();
+          renderQueuePanel();
+        }
+      });
+    }
+    if (!window.contextSortable && contextList) {
+      window.contextSortable = new Sortable(contextList, {
+        group: { name: 'queue', pull: true, put: false },
+        animation: 150,
+        handle: '.drag-handle',
+        draggable: '.queue-row',
+        ghostClass: 'sortable-ghost'
+      });
+    }
   }
 }
 
 async function addSongToQueue(songId) {
   if (!songId) return;
-  state.queue = [...state.queue.filter((id) => id !== songId), songId];
+  state.queue = [songId, ...state.queue.filter((id) => id !== songId)];
   saveQueue();
-  showToast("Added to queue");
+  showToast("Added to play next");
   await ensureSongsCached([songId]);
   renderQueuePanel();
   renderSongs();
