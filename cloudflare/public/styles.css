@@ -1293,6 +1293,9 @@ dd {
     opacity: 0;
     pointer-events: none;
     overflow-y: auto;
+    overscroll-behavior: contain;
+    touch-action: pan-y;
+    will-change: transform;
     transition: transform 220ms ease, opacity 220ms ease;
   }
 
@@ -1310,9 +1313,13 @@ dd {
   }
 
   body.mobile-player-expanded .player-bar {
-    transform: translateY(0);
+    transform: translateY(var(--player-drag-offset, 0px));
     opacity: 1;
     pointer-events: auto;
+  }
+
+  .player-bar.is-dragging {
+    transition: none;
   }
 
   body.mobile-player-expanded .mobile-menu-button {
@@ -1336,6 +1343,7 @@ dd {
     font-size: 1rem;
     line-height: 1;
     padding: 0;
+    touch-action: none;
   }
 
   .mobile-player-handle {
@@ -1536,7 +1544,14 @@ dd {
     padding: 9px 10px;
     border-radius: 16px;
     display: grid;
-    align-content: start;
+    align-content: center;
+    justify-items: center;
+    text-align: center;
+  }
+
+  .meta-link-button {
+    text-align: center;
+    justify-content: center;
   }
 
   .search-wrap input,

@@ -38,6 +38,7 @@ const nodes = {
   mobileMenuToggle: document.querySelector("#mobile-menu-toggle"),
   mobileMenuBackdrop: document.querySelector("#mobile-menu-backdrop"),
   sideRail: document.querySelector("#side-rail"),
+  playerBar: document.querySelector(".player-bar"),
   songList: document.querySelector("#song-list"),
   resultCount: document.querySelector("#result-count"),
   collectionTitle: document.querySelector("#collection-title"),
@@ -106,6 +107,7 @@ let searchDebounce = null;
 let isSeeking = false;
 let mobileMenuOpen = false;
 let mobilePlayerExpanded = false;
+let mobilePlayerDrag = null;
 let queuePanelOpen = false;
 let activeSongMenuId = null;
 const mobileMediaQuery = window.matchMedia("(max-width: 720px)");
@@ -210,6 +212,19 @@ function logPlaybackDebug(event, details = {}) {
   }
 }
 
+function iconMarkup(name) {
+  const icons = {
+    previous: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h2v14H6zM18.5 6.8v10.4c0 .8-.9 1.3-1.6.8l-7-5.2a1 1 0 0 1 0-1.6l7-5.2c.7-.5 1.6 0 1.6.8z" fill="currentColor"/></svg>',
+    next: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h2v14h-2zM5.5 6.8v10.4c0 .8.9 1.3 1.6.8l7-5.2a1 1 0 0 0 0-1.6l-7-5.2c-.7-.5-1.6 0-1.6.8z" fill="currentColor"/></svg>',
+    play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.7 5.4 18 11.2a1 1 0 0 1 0 1.6l-9.3 5.8A1 1 0 0 1 7 17.7V6.3a1 1 0 0 1 1.7-.9z" fill="currentColor"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3v14H7zm7 0h3v14h-3z" fill="currentColor"/></svg>',
+    favorite: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 20.4-1.4-1.3C5.4 14.2 2 11.1 2 7.3 2 4.4 4.2 2 7.1 2c1.7 0 3.3.8 4.3 2.1C12.5 2.8 14.1 2 15.8 2 18.8 2 21 4.4 21 7.3c0 3.8-3.4 6.9-8.6 11.8L12 20.4Z" fill="currentColor"/></svg>',
+    favoriteFilled: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 21.2-1.1-1C5.2 15 2 12 2 8.1 2 5.2 4.2 3 7.1 3c1.8 0 3.4.9 4.4 2.2C12.5 3.9 14.1 3 15.9 3 18.8 3 21 5.2 21 8.1c0 3.9-3.2 6.9-8.9 12.1l-1.1 1Z" fill="currentColor"/></svg>',
+    queue: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14v2H5zm0 4h14v2H5zm0 4h10v2H5z" fill="currentColor"/></svg>',
+  };
+  return icons[name] || "";
+}
+
 function syncMobilePlayerUi() {
   const song = selectedSong();
   const hasSong = Boolean(song);
@@ -230,7 +245,7 @@ function syncMobilePlayerUi() {
   nodes.mobileMiniArtist.textContent = song.artist || song.composer || "Unknown artist";
   if (nodes.mobileMiniArtImage) nodes.mobileMiniArtImage.src = artworkUrlForSong(song);
   const playing = !nodes.audioPlayer.paused;
-  nodes.mobileMiniToggle.textContent = playing ? "⏸" : "▶";
+  nodes.mobileMiniToggle.innerHTML = iconMarkup(playing ? "pause" : "play");
   nodes.mobileMiniToggle.setAttribute("aria-label", playing ? "Pause" : "Play");
 }
 
@@ -244,7 +259,35 @@ function syncMiniPlayerProgress() {
 
 function setMobilePlayerExpanded(expanded) {
   mobilePlayerExpanded = Boolean(expanded && mobileMediaQuery.matches && selectedSong());
+  if (!mobilePlayerExpanded && nodes.playerBar) {
+    nodes.playerBar.style.removeProperty("--player-drag-offset");
+    nodes.playerBar.classList.remove("is-dragging");
+  }
   syncMobilePlayerUi();
+}
+
+function startMobilePlayerDrag(startY) {
+  if (!mobileMediaQuery.matches || !mobilePlayerExpanded || !nodes.playerBar) return;
+  mobilePlayerDrag = { startY, offset: 0 };
+  nodes.playerBar.classList.add("is-dragging");
+}
+
+function updateMobilePlayerDrag(currentY) {
+  if (!mobilePlayerDrag || !nodes.playerBar) return;
+  const offset = Math.max(0, currentY - mobilePlayerDrag.startY);
+  mobilePlayerDrag.offset = offset;
+  nodes.playerBar.style.setProperty("--player-drag-offset", `${offset}px`);
+}
+
+function endMobilePlayerDrag() {
+  if (!mobilePlayerDrag || !nodes.playerBar) return;
+  const shouldClose = mobilePlayerDrag.offset > 110;
+  nodes.playerBar.classList.remove("is-dragging");
+  nodes.playerBar.style.removeProperty("--player-drag-offset");
+  mobilePlayerDrag = null;
+  if (shouldClose) {
+    setMobilePlayerExpanded(false);
+  }
 }
 
 function updateMediaSessionPosition() {
@@ -952,22 +995,24 @@ function updateTransportState() {
 }
 
 function renderTransportLabels() {
-  const isMobile = mobileMediaQuery.matches;
   const playing = !nodes.audioPlayer.paused;
-  nodes.previousTrack.textContent = isMobile ? "⏮" : "Prev";
-  nodes.nextTrack.textContent = isMobile ? "⏭" : "Next";
-  nodes.playToggle.textContent = isMobile ? (playing ? "⏸" : "▶") : (playing ? "Pause" : "Play");
+  nodes.previousTrack.innerHTML = iconMarkup("previous");
+  nodes.nextTrack.innerHTML = iconMarkup("next");
+  nodes.playToggle.innerHTML = iconMarkup(playing ? "pause" : "play");
   if (nodes.favoriteToggle) {
     const saved = isFavorite(state.selectedSongId);
-    nodes.favoriteToggle.textContent = isMobile ? (saved ? "♥" : "♡") : (saved ? "♥" : "♡");
+    nodes.favoriteToggle.innerHTML = iconMarkup(saved ? "favoriteFilled" : "favorite");
     nodes.favoriteToggle.setAttribute("aria-label", saved ? "Remove from favourites" : "Add to favourites");
     nodes.favoriteToggle.title = saved ? "Saved to favourites" : "Add to favourites";
+  }
+  if (nodes.queueToggle) {
+    nodes.queueToggle.innerHTML = iconMarkup("queue");
   }
   nodes.previousTrack.setAttribute("aria-label", "Previous track");
   nodes.nextTrack.setAttribute("aria-label", "Next track");
   nodes.playToggle.setAttribute("aria-label", playing ? "Pause" : "Play");
   if (nodes.mobileMiniToggle) {
-    nodes.mobileMiniToggle.textContent = playing ? "⏸" : "▶";
+    nodes.mobileMiniToggle.innerHTML = iconMarkup(playing ? "pause" : "play");
     nodes.mobileMiniToggle.setAttribute("aria-label", playing ? "Pause" : "Play");
   }
 }
@@ -1823,6 +1868,24 @@ async function switchView(view, playlistId = null) {
   await loadCollectionView();
 }
 
+async function refreshCurrentView() {
+  state.songs = [];
+  state.songCache.clear();
+  state.offset = 0;
+  state.hasMore = false;
+  state.loading = false;
+  await loadAppState();
+  await loadOfficialPlaylists();
+  renderPlaylists();
+  renderFavorites();
+  renderSongs();
+  if (state.currentView === "all") {
+    await loadLibrary({ reset: true });
+    return;
+  }
+  await loadCollectionView();
+}
+
 async function loadAppState() {
   const payload = await fetchJson("/api/app-state");
   state.summary = payload.summary || state.summary;
@@ -1942,8 +2005,12 @@ function bindEvents() {
   nodes.loadMore.addEventListener("click", () => loadLibrary({ reset: false }));
 
   nodes.refreshButton.addEventListener("click", async () => {
-    await loadAppState();
-    await loadLibrary({ reset: true });
+    nodes.refreshButton.disabled = true;
+    try {
+      await refreshCurrentView();
+    } finally {
+      nodes.refreshButton.disabled = false;
+    }
   });
 
   nodes.playlistForm.addEventListener("submit", (event) => {
@@ -2213,6 +2280,26 @@ function bindEvents() {
 
   nodes.mobilePlayerMinimize?.addEventListener("click", () => {
     setMobilePlayerExpanded(false);
+  });
+
+  nodes.mobilePlayerMinimize?.addEventListener("touchstart", (event) => {
+    const touch = event.touches?.[0];
+    if (!touch) return;
+    startMobilePlayerDrag(touch.clientY);
+  }, { passive: true });
+
+  nodes.playerBar?.addEventListener("touchmove", (event) => {
+    const touch = event.touches?.[0];
+    if (!touch || !mobilePlayerDrag) return;
+    updateMobilePlayerDrag(touch.clientY);
+  }, { passive: true });
+
+  nodes.playerBar?.addEventListener("touchend", () => {
+    endMobilePlayerDrag();
+  });
+
+  nodes.playerBar?.addEventListener("touchcancel", () => {
+    endMobilePlayerDrag();
   });
 
   nodes.mobileMiniOpen?.addEventListener("click", () => {
