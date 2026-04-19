@@ -112,18 +112,6 @@ let mediaPositionRaf = null;
 let toastTimer = null;
 const PLAYBACK_DEBUG_PREFIX = "[Sruthi Playback]";
 
-// ─── Next-Track Preloader ────────────────────────────────────────────────────
-// A hidden <audio> element that pre-loads the NEXT song while the current one
-// is still playing. When the current track ends (even in a background/minimized
-// tab), we can swap the buffer in and call .play() synchronously — no async
-// fetch, no DOM blocking, no browser throttling issues.
-const prefetchAudio = new Audio();
-prefetchAudio.preload = "auto";
-prefetchAudio.volume = 0; // silent — just pre-buffering
-let prefetchedSongId = null;  // which song is currently loaded into prefetchAudio
-let prefetchScheduled = false;
-
-
 function sanitizeText(value) {
   return String(value ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -352,13 +340,10 @@ function setupMediaSession(player) {
   const bindings = {
     play: () => player.play(),
     pause: () => player.pause(),
-    // nexttrack / previoustrack use a dedicated background-safe handler so that
-    // car stereos, Bluetooth speakers, and the OS notification bar all work
-    // correctly even when the tab is minimized or switched away.
-    previoustrack: () => stepTrackFromExternal(-1),
-    nexttrack:     () => stepTrackFromExternal(1),
+    previoustrack: () => player.previous(),
+    nexttrack: () => player.next(),
     seekbackward: (details) => player.seekBy(-(details?.seekOffset || 10)),
-    seekforward:  (details) => player.seekBy(details?.seekOffset || 10),
+    seekforward: (details) => player.seekBy(details?.seekOffset || 10),
     seekto: (details) => {
       if (Number.isFinite(details?.seekTime)) {
         nodes.audioPlayer.currentTime = details.seekTime;
@@ -878,6 +863,8 @@ function removeSongFromQueue(songId) {
 function orderedFavorites() {
   const items = [...state.favorites];
   switch (state.favoriteSort) {
+    case "recent":
+      return items.reverse();
     case "title":
       return items.sort((a, b) => sanitizeText(a.title).localeCompare(sanitizeText(b.title)));
     case "composer":
@@ -885,6 +872,7 @@ function orderedFavorites() {
         const composerRank = sanitizeText(a.composer).localeCompare(sanitizeText(b.composer));
         return composerRank || sanitizeText(a.title).localeCompare(sanitizeText(b.title));
       });
+    case "manual":
     default:
       return items;
   }
@@ -1034,6 +1022,7 @@ function filterClientSongs(songs) {
       return songMatches(song, state.query) < 99;
     })
     .sort((a, b) => {
+      if (!state.query) return 0; // Preserve order from collectionIds/orderedFavorites
       const matchRank = songMatches(a, state.query) - songMatches(b, state.query);
       if (matchRank) return matchRank;
       return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
@@ -1062,7 +1051,22 @@ async function loadCollectionView() {
         songs.forEach(syncFavoriteSnapshot);
         playlist.songIds = songIds;
         playlist.songCount = songIds.length;
-        const filtered = filterClientSongs(songIds.map((songId) => state.songCache.get(songId)).filter(Boolean));
+        const rawSongs = songIds.map((songId) => state.songCache.get(songId)).filter(Boolean);
+        const displayName = officialPlaylistDisplayName(playlist.name);
+        let filtered = rawSongs;
+
+        // Strict composer filtering for "Hits" playlists
+        if (displayName.endsWith(" Hits")) {
+          const targetComposer = displayName.replace(" Hits", "").toLowerCase().trim();
+          filtered = rawSongs.filter(song => {
+            const songComposer = (song.composer || "").toLowerCase();
+            const songArtist = (song.artist || "").toLowerCase();
+            // Check if target composer name exists in composer or artist fields
+            return songComposer.includes(targetComposer) || songArtist.includes(targetComposer);
+          });
+        }
+
+        filtered = filterClientSongs(filtered);
         state.songs = filtered;
         state.totalSongs = filtered.length;
         state.hasMore = false;
@@ -1208,11 +1212,8 @@ function renderSelectedSong() {
   nodes.nowTitle.textContent = song.title;
   nodes.nowArtist.textContent = song.artist;
   nodes.nowMovie.textContent = song.movie || "-";
-  nodes.nowMovie.title = song.movie || "";
   nodes.nowYear.textContent = song.year || "-";
-  nodes.nowYear.title = song.year ? String(song.year) : "";
   nodes.nowComposer.textContent = song.composer || "-";
-  nodes.nowComposer.title = song.composer || "";
   if (nodes.playerAvatar) nodes.playerAvatar.src = artworkUrlForSong(song);
   if (nodes.mobileMiniArtImage) nodes.mobileMiniArtImage.src = artworkUrlForSong(song);
   renderMobilePlayerPlaylistPicker();
@@ -1276,36 +1277,12 @@ function waitForPlayableAudio() {
   });
 }
 
-function assignAudioSource(song, reason = "unknown") {
-  if (!song) return false;
-  state.playbackCandidates = playbackCandidatesForSong(song);
-  const playbackUrl = state.playbackCandidates[0] || "";
-  if (!playbackUrl) return false;
-  const absolute = new URL(playbackUrl, window.location.origin).toString();
-  if (nodes.audioPlayer.src !== absolute) {
-    logPlaybackDebug("next-track-source-assigned", {
-      reason,
-      songId: song.id,
-      title: song.title,
-      src: playbackUrl,
-    });
-    nodes.audioPlayer.src = playbackUrl;
-    nodes.audioPlayer.load();
-  }
-  nodes.audioPlayer.loop = state.playbackMode === "loop";
-  nodes.audioPlayer.playbackRate = state.playbackSpeed;
-  return true;
-}
-
-async function playCurrentSong({ waitForReady = true, reason = "manual" } = {}) {
+async function playCurrentSong() {
   const song = selectedSong();
   if (!song || !playbackUrlForSong(song)) return;
   try {
-    if (waitForReady) {
-      await waitForPlayableAudio();
-    }
+    await waitForPlayableAudio();
     logPlaybackDebug("play-attempt", {
-      reason,
       songId: song.id,
       title: song.title,
       src: nodes.audioPlayer.currentSrc || playbackUrlForSong(song),
@@ -1339,9 +1316,6 @@ async function selectSong(songId, { autoplay = false } = {}) {
       return;
     }
   }
-  // Reset prefetch state so the preloader re-runs for the new song's next track
-  prefetchScheduled = false;
-  prefetchedSongId = null;
   state.selectedSongId = songId;
   if (state.playbackMode === "shuffle") {
     ensureShuffleCursor();
@@ -1351,16 +1325,9 @@ async function selectSong(songId, { autoplay = false } = {}) {
   if (mobileMediaQuery.matches) {
     setMobilePlayerExpanded(true);
   }
-  const song = selectedSong();
-  if (song) {
-    assignAudioSource(song, autoplay ? "autoplay-select" : "select");
-    syncMediaSession();
-  }
   const index = selectedSongIndex();
   prefetchSongIds([songId, state.songs[index - 1]?.id, state.songs[index + 1]?.id]);
-  // Eagerly cache adjacent songs so external controls (car/Bluetooth) always have URLs
-  void preCacheAdjacentSongs();
-  if (autoplay) await playCurrentSong({ waitForReady: false, reason: "select-song" });
+  if (autoplay) await playCurrentSong();
 }
 
 function getNextIndex() {
@@ -1426,215 +1393,27 @@ function nextSongByMode(direction = 1) {
   return state.songCache.get(nextId) || null;
 }
 
-// ─── Background-safe external track step ──────────────────────────────────────
-// Called by car stereo / Bluetooth speaker / OS notification bar controls via
-// the MediaSession API. The tab may be minimized or in the background when this
-// fires. Requirements:
-//   1. ZERO async blocking before play() — no waitForReady, no canplay wait
-//   2. Update navigator.mediaSession.metadata BEFORE play() so the notification
-//      bar shows the new song title/artist immediately
-//   3. Defer all heavy DOM work (renderSongs, renderQueuePanel) to after play()
-async function stepTrackFromExternal(direction) {
-  const nextSong = nextSongByMode(direction);
-  if (!nextSong) {
-    logPlaybackDebug("external-step-no-next", { direction });
-    return;
-  }
-
-  const url = playbackUrlForSong(nextSong);
-  if (!url) {
-    // Song URL not in cache — fetch it then retry once
-    logPlaybackDebug("external-step-url-missing", { songId: nextSong.id });
-    try {
-      await fetchSongById(nextSong.id);
-    } catch (_) {}
-    const reloaded = state.songCache.get(nextSong.id);
-    const retryUrl = reloaded ? playbackUrlForSong(reloaded) : "";
-    if (!retryUrl) return;
-    // Recurse with the data now available
-    return stepTrackFromExternal(direction);
-  }
-
-  logPlaybackDebug("external-step", { direction, songId: nextSong.id, title: nextSong.title });
-
-  // ── 1. Update state synchronously ────────────────────────────────────────
-  prefetchScheduled = false;
-  prefetchedSongId = null;
-  state.selectedSongId = nextSong.id;
-  if (state.playbackMode === "shuffle") ensureShuffleCursor();
-
-  // ── 2. Push metadata to notification bar / car display IMMEDIATELY ───────
-  // This is the only thing the car stereo / lock screen cares about.
-  if ("mediaSession" in navigator) {
-    try {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title:   nextSong.title  || "Sruthi",
-        artist:  nextSong.artist || nextSong.composer || "Tamil Music Vault",
-        album:   nextSong.movie  || "Sruthi",
-        artwork: [{ src: artworkUrlForSong(nextSong), sizes: "512x512", type: "image/jpeg" }],
-      });
-      navigator.mediaSession.playbackState = "playing";
-    } catch (_) {}
-  }
-
-  // ── 3. Swap audio source and play — NO waiting for canplay ───────────────
-  nodes.audioPlayer.src = url;
-  nodes.audioPlayer.loop  = state.playbackMode === "loop";
-  nodes.audioPlayer.playbackRate = state.playbackSpeed;
-  nodes.audioPlayer.volume = state.volumeLevel;
-
-  try {
-    await nodes.audioPlayer.play();
-    logPlaybackDebug("external-step-play-started", { songId: nextSong.id });
-    // Update position state so the car display shows correct progress
-    if ("mediaSession" in navigator && typeof navigator.mediaSession.setPositionState === "function") {
-      try { navigator.mediaSession.setPositionState({ duration: 0, playbackRate: state.playbackSpeed, position: 0 }); } catch (_) {}
-    }
-  } catch (err) {
-    logPlaybackDebug("external-step-play-failed", { message: err?.message });
-  }
-
-  // ── 4. Defer heavy DOM work so it never races with play() ────────────────
-  requestAnimationFrame(() => {
-    const wasExpanded = mobilePlayerExpanded;
-    renderSongs();
-    renderQueuePanel();
-    renderSelectedSong();
-    syncMediaSession();
-    if (mobileMediaQuery.matches && wasExpanded) setMobilePlayerExpanded(true);
-    // Pre-cache the songs around the new current position
-    void preCacheAdjacentSongs();
-  });
-}
-
-// Pre-cache the songs immediately surrounding the current track so that
-// external controls (car, Bluetooth) can always find a URL in cache.
-async function preCacheAdjacentSongs() {
-  const index = selectedSongIndex();
-  if (index < 0) return;
-  const nearby = [
-    state.songs[index + 1]?.id,
-    state.songs[index + 2]?.id,
-    state.songs[index + 3]?.id,
-    state.songs[index - 1]?.id,
-    state.songs[index - 2]?.id,
-  ].filter(Boolean);
-  if (nearby.length) {
-    await ensureSongsCached(nearby).catch(() => {});
-  }
-}
-
-// ─── Next-track pre-loading ───────────────────────────────────────────────────
-// Called during timeupdate when ~30 s remain. Loads the next song URL into
-// the silent prefetchAudio element so it is buffered before the current track
-// ends — meaning handleTrackEnd can swap and play without any async gap.
-function scheduleNextTrackPrefetch() {
-  if (prefetchScheduled) return;
-  const song = selectedSong();
-  if (!song) return;
-  const duration = nodes.audioPlayer.duration;
-  const currentTime = nodes.audioPlayer.currentTime;
-  if (!Number.isFinite(duration) || duration <= 0) return;
-  const remaining = duration - currentTime;
-  if (remaining > 35) return; // only start when 35 s or less remain
-
-  prefetchScheduled = true;
-
-  // Work out which song comes next (mirrors nextSongByMode logic but read-only)
-  const peek = peekNextSong();
-  if (!peek || peek.id === prefetchedSongId) return;
-
-  const url = playbackUrlForSong(peek);
-  if (!url) return;
-
-  logPlaybackDebug("prefetch-next-track", { songId: peek.id, title: peek.title, remaining });
-  prefetchedSongId = peek.id;
-  prefetchAudio.src = url;
-  prefetchAudio.load();
-}
-
-// Read-only version of nextSongByMode — does NOT mutate queue or shuffle state.
-function peekNextSong() {
-  const ctx = getContext();
-  if (!ctx.length) return null;
-  // Queue takes priority
-  if (state.queue.length) {
-    return state.songCache.get(state.queue[0]) || null;
-  }
-  const currentIndex = ctx.indexOf(state.selectedSongId);
-  if (state.playbackMode === "loop") return state.songCache.get(ctx[currentIndex]) || null;
-  if (state.playbackMode === "shuffle") {
-    const nextCursor = state.shuffleCursor + 1;
-    if (nextCursor < state.shuffleOrder.length) {
-      return state.songCache.get(state.shuffleOrder[nextCursor]) || null;
-    }
-    return null;
-  }
-  const nextIdx = currentIndex + 1;
-  if (nextIdx < ctx.length) return state.songCache.get(ctx[nextIdx]) || null;
-  if (state.playbackMode === "repeat") return state.songCache.get(ctx[0]) || null;
-  return null;
-}
-
 async function handleTrackEnd() {
   logPlaybackDebug("audio-ended", {
     songId: state.selectedSongId,
     title: selectedSong()?.title || "",
   });
-
   const nextSong = nextSongByMode(1);
   if (!nextSong) {
-    logPlaybackDebug("next-track-resolved", { resolved: false, reason: "no-next-track" });
+    logPlaybackDebug("next-track-resolved", {
+      resolved: false,
+      reason: "no-next-track",
+    });
     nodes.audioPlayer.pause();
     updateTransportState();
     return;
   }
-
   logPlaybackDebug("next-track-resolved", {
     resolved: true,
     nextSongId: nextSong.id,
     nextTitle: nextSong.title,
-    usedPrefetch: prefetchedSongId === nextSong.id,
   });
-
-  // ── Critical path: do the MINIMUM to get audio playing immediately.
-  // DOM renders are deferred so they never block the play() call.
-  state.selectedSongId = nextSong.id;
-  prefetchScheduled = false; // reset for the new track
-
-  if (state.playbackMode === "shuffle") ensureShuffleCursor();
-
-  const url = playbackUrlForSong(nextSong);
-  if (!url) {
-    updateTransportState();
-    return;
-  }
-
-  // If the prefetchAudio has this track buffered, swap it into the main player
-  // by just updating src (the browser keeps the buffered data).
-  nodes.audioPlayer.src = url;
-  nodes.audioPlayer.loop = state.playbackMode === "loop";
-  nodes.audioPlayer.playbackRate = state.playbackSpeed;
-  nodes.audioPlayer.volume = state.volumeLevel;
-
-  // play() even in a background tab — browsers allow this for <audio> that
-  // was already playing (autoplay policy satisfied by previous user gesture).
-  try {
-    await nodes.audioPlayer.play();
-    logPlaybackDebug("next-track-play-started", { songId: nextSong.id });
-  } catch (err) {
-    logPlaybackDebug("next-track-play-failed", { message: err?.message });
-  }
-
-  // Defer heavy DOM work so it never races with play()
-  requestAnimationFrame(() => {
-    const wasExpanded = mobilePlayerExpanded;
-    renderSongs();
-    renderQueuePanel();
-    renderSelectedSong();
-    syncMediaSession();
-    if (mobileMediaQuery.matches && wasExpanded) setMobilePlayerExpanded(true);
-  });
+  await selectSong(nextSong.id, { autoplay: true });
 }
 
 async function stepTrack(direction) {
@@ -2122,7 +1901,6 @@ function bindEvents() {
   nodes.audioPlayer.addEventListener("timeupdate", () => {
     updateTransportState();
     scheduleMediaSessionPosition();
-    scheduleNextTrackPrefetch(); // pre-load next song before this one ends
   });
   nodes.audioPlayer.addEventListener("error", () => {
     const song = selectedSong();
@@ -2140,24 +1918,6 @@ function bindEvents() {
 
   nodes.audioPlayer.addEventListener("ended", async () => {
     await handleTrackEnd();
-  });
-
-  // ─── Visibility guard ────────────────────────────────────────────────────
-  // Browsers fire visibilitychange when switching tabs. Some browser extensions
-  // or framework code can accidentally pause audio here. This guard re-resumes
-  // playback if the audio was playing before the tab was hidden.
-  let wasPlayingBeforeHidden = false;
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
-      // Record whether audio was playing when we left the tab
-      wasPlayingBeforeHidden = !nodes.audioPlayer.paused;
-    } else {
-      // Tab became visible again: if audio was playing and is now paused
-      // (i.e. something interrupted it), resume it.
-      if (wasPlayingBeforeHidden && nodes.audioPlayer.paused && state.selectedSongId) {
-        nodes.audioPlayer.play().catch(() => {});
-      }
-    }
   });
 
   nodes.playlistList.addEventListener("click", (event) => {
@@ -2222,9 +1982,6 @@ async function bootstrap() {
   });
   await loadAppState();
   await loadLibrary({ reset: true });
-  // Pre-cache songs around the initial selected song so Bluetooth/car controls
-  // work immediately without any background fetch
-  void preCacheAdjacentSongs();
   postJson("/api/warmup", { limit: 8 }).catch(() => {});
 }
 

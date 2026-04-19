@@ -16,7 +16,7 @@
     />
     <link rel="icon" type="image/jpeg" href="./Sruthi_kutty.jpg" />
     <link rel="apple-touch-icon" href="./Sruthi_kutty.jpg" />
-    <link rel="stylesheet" href="./styles-new.css?v=16" />
+    <link rel="stylesheet" href="./styles-new.css?v=20" />
   </head>
   <body>
     <button id="mobile-menu-toggle" class="mobile-menu-button" type="button" aria-label="Open library menu" aria-expanded="false">
@@ -153,24 +153,6 @@
               <button id="mobile-speed-toggle" class="transport-button option-icon-button mobile-only-control" type="button" aria-label="Playback speed" title="Playback speed">1x</button>
               <button id="queue-toggle" class="transport-button queue-button option-icon-button" type="button" aria-expanded="false" aria-label="Show queue" title="Show queue">☰</button>
 
-              <div class="player-utility">
-                <label class="volume-wrap" for="volume-control">
-                  <span class="volume-icon" aria-hidden="true">🔊</span>
-                  <span class="volume-label">Volume</span>
-                  <span class="sr-only">Adjust volume</span>
-                  <input
-                    id="volume-control"
-                    class="volume-bar"
-                    type="range"
-                    min="0"
-                    max="100"
-                    value="85"
-                    step="1"
-                    aria-label="Volume"
-                  />
-                  <span id="volume-value" class="volume-value">85%</span>
-                </label>
-              </div>
             </div>
 
             <label class="mobile-player-playlist-wrap" for="mobile-player-playlist">
@@ -184,6 +166,25 @@
               <span id="current-time" class="time-stamp">0:00</span>
               <input id="seek-bar" class="seek-bar" type="range" min="0" max="100" value="0" step="0.1" aria-label="Seek playback" />
               <span id="duration-time" class="time-stamp">0:00</span>
+            </div>
+
+            <div class="player-utility">
+              <label class="volume-wrap" for="volume-control">
+                <span class="volume-icon" aria-hidden="true">🔊</span>
+                <span class="volume-label">Volume</span>
+                <span class="sr-only">Adjust volume</span>
+                <input
+                  id="volume-control"
+                  class="volume-bar"
+                  type="range"
+                  min="0"
+                  max="100"
+                  value="85"
+                  step="1"
+                  aria-label="Volume"
+                />
+                <span id="volume-value" class="volume-value">85%</span>
+              </label>
             </div>
           </div>
 
@@ -353,6 +354,6 @@
       </div>
     </div>
 
-    <script src="./app-new.js?v=16"></script>
+    <script src="./app-new.js?v=20"></script>
   </body>
 </html>

@@ -408,12 +408,9 @@ dt {
 
 .player-bar-main {
   display: grid;
-  /* avatar | song copy — leave room on right for the floating meta overlay */
   grid-template-columns: 48px minmax(0, 1fr);
   gap: 8px;
-  align-items: start;
-  /* right padding reserves space so text doesn’t slide under the meta layer */
-  padding-right: clamp(170px, 26vw, 280px);
+  align-items: center;
 }
 
 .player-copy {
@@ -438,23 +435,11 @@ dt {
 }
 
 .player-meta {
-  /* Floating overlay — top-right corner of the player card */
-  position: absolute;
-  top: 10px;
-  right: 10px;
-  /* stack MOVIE / YEAR / COMPOSER vertically */
   display: flex;
-  flex-direction: column;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 6px;
   z-index: 10;
-  /* glass panel behind the boxes */
-  padding: 6px;
-  border-radius: 12px;
-  background: rgba(7, 15, 29, 0.55);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  /* max-width so very long names still wrap to 2 lines rather than going off-screen */
-  max-width: clamp(140px, 22vw, 240px);
 }
 
 .player-meta div {
@@ -463,8 +448,7 @@ dt {
   border: 1px solid var(--line);
   background: rgba(14, 26, 49, 0.9);
   min-width: 80px;
-  /* wide enough to show most names in 1-2 lines */
-  width: 100%;
+  text-align: center;
 }
 
 dt {
@@ -510,10 +494,10 @@ dd {
 
 .player-options {
   display: flex;
-  flex-wrap: nowrap; /* strictly one straight line */
+  flex-wrap: wrap; /* natural wrap for mobile */
   gap: 7px;
   align-items: center;
-  justify-content: center; /* centred */
+  justify-content: center;
 }
 
 .play-toggle {
@@ -589,8 +573,6 @@ dd {
   display: grid;
   gap: 7px;
   position: relative;
-  /* right padding mirrors player-bar-main so content aligns */
-  padding-right: clamp(170px, 26vw, 280px);
 }
 
 .queue-panel {
@@ -792,6 +774,51 @@ dd {
   line-height: 1;
 }
 
+/* DESKTOP (where space allows floating layouts and strict rows) */
+@media (min-width: 768px) {
+  .player-bar-main {
+    padding-right: clamp(170px, 26vw, 280px);
+    align-items: start;
+  }
+  
+  .player-transport {
+    grid-template-columns: minmax(0, 1fr) auto auto minmax(0, 1fr);
+    grid-template-areas:
+      ". actions actions ."
+      ". options volume ."
+      "playlist playlist playlist playlist"
+      "seek seek seek seek";
+  }
+  
+  .player-actions { grid-column: 2 / 4; justify-self: center; }
+  .player-options { grid-area: options; justify-self: end; flex-wrap: nowrap; margin-right: 8px; }
+  .mobile-player-playlist-wrap { grid-column: 1 / -1; }
+  .seek-shell { grid-column: 1 / -1; }
+  .player-utility { grid-area: volume; justify-self: start; }
+  
+  .player-meta {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    flex-direction: column;
+    padding: 6px;
+    border-radius: 12px;
+    background: rgba(7, 15, 29, 0.55);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    max-width: clamp(140px, 22vw, 240px);
+  }
+  
+  .player-meta div {
+    text-align: left;
+    width: 100%;
+  }
+}
+.volume-icon {
+  font-size: 0.95rem;
+  line-height: 1;
+}
+
 .volume-label,
 .volume-value {
   color: var(--muted);
@@ -820,9 +847,14 @@ dd {
 
 .seek-shell {
   display: grid;
-  grid-template-columns: 38px minmax(0, 1fr) 38px;
-  gap: 8px;
+  grid-template-columns: auto 1fr auto;
+  gap: 12px;
   align-items: center;
+  width: calc(100% + 20px); /* Span past the 10px + 10px container padding */
+  margin: 4px -10px -10px -10px; /* Pull to absolute edges and bottom */
+  padding: 8px 14px; /* Internal breathing room for timestamps */
+  background: rgba(0, 0, 0, 0.15); /* Subtle anchor for the bottom bar */
+  border-radius: 0 0 14px 14px;
 }
 
 .seek-bar {
@@ -832,8 +864,18 @@ dd {
 
 .time-stamp {
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.76rem;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
+  min-width: 40px;
+}
+
+#current-time {
+  text-align: left;
+}
+
+#duration-time {
+  text-align: right;
 }
 
 #audio-player {
