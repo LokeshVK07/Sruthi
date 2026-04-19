@@ -661,6 +661,29 @@ dd {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.queue-row.sortable-ghost {
+  opacity: 0.4;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.queue-row.is-now-playing {
+  background: linear-gradient(135deg, rgba(82, 168, 255, 0.1), rgba(41, 107, 255, 0.1));
+  border: 1px solid rgba(82, 168, 255, 0.2);
+}
+
+.drag-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  color: var(--muted);
+  width: 24px;
+  height: 24px;
+}
+.drag-handle:active {
+  cursor: grabbing;
+}
+
 .queue-main {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);

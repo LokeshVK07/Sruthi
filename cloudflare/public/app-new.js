@@ -68,8 +68,10 @@ const nodes = {
   queueToggle: document.querySelector("#queue-toggle"),
   queuePanel: document.querySelector("#queue-panel"),
   queueCount: document.querySelector("#queue-count"),
+  queueNowPlaying: document.querySelector("#queue-now-playing"),
   queueList: document.querySelector("#queue-list"),
   queueClose: document.querySelector("#queue-close"),
+  queueClear: document.querySelector("#queue-clear"),
   queueBackdrop: document.querySelector("#queue-backdrop"),
   mobileModeToggle: document.querySelector("#mobile-mode-toggle"),
   mobileSpeedToggle: document.querySelector("#mobile-speed-toggle"),
@@ -847,6 +849,8 @@ function openSongContextMenu(songId, anchor) {
   positionSongContextMenu(anchor);
 }
 
+let queueSortable = null;
+
 function renderQueuePanel() {
   if (!nodes.queuePanel || !nodes.queueList || !nodes.queueCount || !nodes.queueToggle) return;
   const songs = queuedSongs();
@@ -856,9 +860,28 @@ function renderQueuePanel() {
   nodes.queueToggle.title = state.queue.length ? `Show queue (${state.queue.length})` : "Show queue";
   nodes.queueToggle.classList.toggle("is-open", queuePanelOpen);
   nodes.queuePanel.hidden = !queuePanelOpen;
+  
+  if (nodes.queueClear) nodes.queueClear.style.display = state.queue.length ? "inline-block" : "none";
   if (nodes.queueBackdrop) nodes.queueBackdrop.hidden = !queuePanelOpen || !mobileMediaQuery.matches;
-  nodes.queueList.innerHTML = "";
+  
+  if (nodes.queueNowPlaying) {
+    nodes.queueNowPlaying.innerHTML = "";
+    if (state.selectedSongId) {
+      const nowSong = state.songCache.get(state.selectedSongId);
+      nodes.queueNowPlaying.innerHTML = `
+        <div class="queue-section-header">Now Playing</div>
+        <div class="queue-row is-now-playing">
+          <div class="queue-main">
+            <span class="queue-copy">
+              <strong>${nowSong?.title || state.selectedSongId}</strong>
+            </span>
+          </div>
+        </div>
+      `;
+    }
+  }
 
+  nodes.queueList.innerHTML = "";
   const fragment = document.createDocumentFragment();
 
   if (state.queue.length) {
@@ -873,7 +896,8 @@ function renderQueuePanel() {
       row.className = "queue-row is-manual";
       row.dataset.songId = entry.id;
       row.innerHTML = `
-        <button class="queue-main" type="button">
+        <div class="drag-handle" aria-hidden="true">☰</div>
+        <button class="queue-main" type="button" style="grid-column: 2 / -2;">
           <span class="queue-copy">
             <strong>${song?.title || entry.id}</strong>
           </span>
@@ -919,13 +943,30 @@ function renderQueuePanel() {
 
   nodes.queueList.append(fragment);
   positionQueuePanel();
+
+  if (window.Sortable && queuePanelOpen && !queueSortable) {
+    queueSortable = new Sortable(nodes.queueList, {
+      animation: 150,
+      handle: '.drag-handle',
+      draggable: '.is-manual',
+      ghostClass: 'sortable-ghost',
+      onEnd: function (evt) {
+        if (evt.oldIndex === evt.newIndex) return;
+        const domNodes = Array.from(nodes.queueList.querySelectorAll('.is-manual'));
+        const newQueue = domNodes.map(el => el.dataset.songId);
+        state.queue = newQueue;
+        saveQueue();
+        renderSongs();
+      }
+    });
+  }
 }
 
 async function addSongToQueue(songId) {
   if (!songId) return;
-  state.queue = [songId, ...state.queue.filter((id) => id !== songId)];
+  state.queue = [...state.queue.filter((id) => id !== songId), songId];
   saveQueue();
-  showToast("Added to play next");
+  showToast("Added to queue");
   await ensureSongsCached([songId]);
   renderQueuePanel();
   renderSongs();
@@ -933,6 +974,13 @@ async function addSongToQueue(songId) {
 
 function removeSongFromQueue(songId) {
   state.queue = state.queue.filter((id) => id !== songId);
+  saveQueue();
+  renderQueuePanel();
+  renderSongs();
+}
+
+function clearQueue() {
+  state.queue = [];
   saveQueue();
   renderQueuePanel();
   renderSongs();
@@ -1496,6 +1544,29 @@ function getPrevIndex() {
   return -1;
 }
 
+function generateSimilarSongs(sourceSong, limit = 15) {
+  if (!sourceSong) return [];
+  const songs = [...state.songCache.values()];
+  const avoidIds = new Set([...state.queue, state.selectedSongId, sourceSong.id]);
+  const candidates = songs.filter(song => {
+    if (avoidIds.has(song.id)) return false;
+    let match = false;
+    // Prefer composer match if available
+    if (sourceSong.composer && song.composer && sanitizeText(song.composer).includes(sanitizeText(sourceSong.composer))) match = true;
+    // Fallback to album or year
+    if (sourceSong.album && song.album === sourceSong.album) match = true;
+    if (sourceSong.year && song.year === sourceSong.year) match = true;
+    return match;
+  });
+  
+  // Deterministic randomize
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  return candidates.slice(0, limit);
+}
+
 function nextSongByMode(direction = 1) {
   const ctx = getContext();
   if (!ctx.length) return null;
@@ -1506,6 +1577,18 @@ function nextSongByMode(direction = 1) {
     return state.songCache.get(nextQueuedId) || null;
   }
   const targetIndex = direction > 0 ? getNextIndex() : getPrevIndex();
+  
+  if (direction > 0 && targetIndex < 0) {
+    const similar = generateSimilarSongs(selectedSong());
+    if (similar.length) {
+      state.queue = similar.map(s => s.id);
+      const nextQueuedId = state.queue.shift();
+      saveQueue();
+      renderQueuePanel();
+      return state.songCache.get(nextQueuedId) || null;
+    }
+  }
+
   if (targetIndex < 0) return null;
   const nextId = ctx[targetIndex];
   return state.songCache.get(nextId) || null;
@@ -2134,6 +2217,11 @@ function bindEvents() {
   nodes.queueClose?.addEventListener("click", (event) => {
     event.stopPropagation();
     setQueuePanelOpen(false);
+  });
+
+  nodes.queueClear?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    clearQueue();
   });
 
   nodes.queueBackdrop?.addEventListener("click", () => {
