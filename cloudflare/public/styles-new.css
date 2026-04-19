@@ -520,6 +520,23 @@ dd {
   cursor: pointer;
 }
 
+.transport-button svg,
+.queue-button svg,
+.heart-button svg,
+.mobile-mini-toggle svg {
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.play-toggle svg {
+  width: 26px;
+  height: 26px;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
 .heart-button.is-active {
   color: #08111f;
   background: linear-gradient(135deg, var(--accent-2), var(--accent));

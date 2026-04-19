@@ -941,6 +941,8 @@ function removeSongFromQueue(songId) {
 function orderedFavorites() {
   const items = [...state.favorites];
   switch (state.favoriteSort) {
+    case "recent":
+      return items.reverse();
     case "title":
       return items.sort((a, b) => sanitizeText(a.title).localeCompare(sanitizeText(b.title)));
     case "composer":
@@ -948,6 +950,7 @@ function orderedFavorites() {
         const composerRank = sanitizeText(a.composer).localeCompare(sanitizeText(b.composer));
         return composerRank || sanitizeText(a.title).localeCompare(sanitizeText(b.title));
       });
+    case "manual":
     default:
       return items;
   }
@@ -1099,6 +1102,7 @@ function filterClientSongs(songs) {
       return songMatches(song, state.query) < 99;
     })
     .sort((a, b) => {
+      if (!state.query) return 0;
       const matchRank = songMatches(a, state.query) - songMatches(b, state.query);
       if (matchRank) return matchRank;
       return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
@@ -1127,7 +1131,21 @@ async function loadCollectionView() {
         songs.forEach(syncFavoriteSnapshot);
         playlist.songIds = songIds;
         playlist.songCount = songIds.length;
-        const filtered = filterClientSongs(songIds.map((songId) => state.songCache.get(songId)).filter(Boolean));
+        const rawSongs = songIds.map((songId) => state.songCache.get(songId)).filter(Boolean);
+        const displayName = officialPlaylistDisplayName(playlist.name);
+        let filtered = rawSongs;
+
+        // Strict composer filtering for "Hits" playlists
+        if (displayName.endsWith(" Hits")) {
+          const targetComposer = displayName.replace(" Hits", "").toLowerCase().trim();
+          filtered = rawSongs.filter(song => {
+            const songComposer = (song.composer || "").toLowerCase();
+            const songArtist = (song.artist || "").toLowerCase();
+            return songComposer.includes(targetComposer) || songArtist.includes(targetComposer);
+          });
+        }
+
+        filtered = filterClientSongs(filtered);
         state.songs = filtered;
         state.totalSongs = filtered.length;
         state.hasMore = false;
