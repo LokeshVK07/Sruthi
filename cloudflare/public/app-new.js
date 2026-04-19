@@ -535,7 +535,23 @@ function currentCollectionTitle() {
     const playlist = currentPlaylist();
     return playlist?.official ? officialPlaylistDisplayName(playlist.name) : playlist?.name || "Playlist";
   }
+  if (state.albumFilter) return state.albumFilter;
   return "Song Collection";
+}
+
+async function openAlbumView(movieName) {
+  const movie = sanitizeText(movieName);
+  if (!movie) return;
+  state.currentView = "all";
+  state.currentPlaylistId = null;
+  state.albumFilter = movie;
+  state.query = "";
+  state.offset = 0;
+  if (nodes.searchInput) nodes.searchInput.value = "";
+  renderFavorites();
+  renderPlaylists();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  await loadLibrary({ reset: true });
 }
 
 function renderMobilePlayerPlaylistPicker() {
@@ -1190,6 +1206,7 @@ function renderSelectedSong() {
     nodes.nowTitle.textContent = "Choose a song";
     nodes.nowArtist.textContent = "Select a track from the library.";
     nodes.nowMovie.textContent = "-";
+    nodes.nowMovie.disabled = true;
     nodes.nowYear.textContent = "-";
     nodes.nowComposer.textContent = "-";
     if (nodes.playerAvatar) nodes.playerAvatar.src = currentArtworkUrl();
@@ -1213,8 +1230,12 @@ function renderSelectedSong() {
   nodes.nowTitle.textContent = song.title;
   nodes.nowArtist.textContent = song.artist;
   nodes.nowMovie.textContent = song.movie || "-";
+  nodes.nowMovie.title = song.movie || "";
+  nodes.nowMovie.disabled = !sanitizeText(song.movie);
   nodes.nowYear.textContent = song.year || "-";
+  nodes.nowYear.title = song.year ? String(song.year) : "";
   nodes.nowComposer.textContent = song.composer || "-";
+  nodes.nowComposer.title = song.composer || "";
   if (nodes.playerAvatar) nodes.playerAvatar.src = artworkUrlForSong(song);
   if (nodes.mobileMiniArtImage) nodes.mobileMiniArtImage.src = artworkUrlForSong(song);
   renderMobilePlayerPlaylistPicker();
@@ -1562,6 +1583,7 @@ function moveFavoriteToIndex(songId, targetIndex) {
 async function switchView(view, playlistId = null) {
   state.currentView = view;
   state.currentPlaylistId = playlistId;
+  state.albumFilter = "";
   state.offset = 0;
   state.query = "";
   if (nodes.searchInput) nodes.searchInput.value = "";
@@ -1608,6 +1630,7 @@ async function loadLibrary({ reset = false } = {}) {
   try {
     const params = new URLSearchParams({
       query: state.query,
+      movie: state.albumFilter,
       decade: state.decade,
       localSongs: state.localSongs ? "true" : "false",
       offset: reset ? "0" : String(state.offset),
@@ -1764,6 +1787,11 @@ function bindEvents() {
   nodes.playToggle.addEventListener("click", togglePlayback);
   nodes.previousTrack.addEventListener("click", () => stepTrack(-1));
   nodes.nextTrack.addEventListener("click", () => stepTrack(1));
+  nodes.nowMovie?.addEventListener("click", async () => {
+    const song = selectedSong();
+    if (!song?.movie) return;
+    await openAlbumView(song.movie);
+  });
   nodes.playbackMode.addEventListener("change", (event) => {
     setPlaybackMode(event.target.value);
   });

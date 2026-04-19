@@ -1264,11 +1264,14 @@ def ensure_index():
     )
 
 
-def query_songs(query="", decade="all", mood="all", offset=0, limit=120, local_songs=False):
+def query_songs(query="", decade="all", mood="all", offset=0, limit=120, local_songs=False, movie=""):
     query = clean_text(query).lower()
+    movie = clean_text(movie).lower()
 
     def include(song):
         if query and query not in song["_search"]:
+            return False
+        if movie and song["_movie_search"] != movie:
             return False
         if decade != "all" and song["_decade"] != decade:
             return False
@@ -2128,12 +2131,13 @@ class CatalogHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/library":
             params = parse_qs(parsed.query)
             query = params.get("query", [""])[0]
+            movie = params.get("movie", [""])[0]
             decade = params.get("decade", ["all"])[0]
             mood = params.get("mood", ["all"])[0]
             offset = int(params.get("offset", ["0"])[0])
             limit = int(params.get("limit", ["120"])[0])
             local_songs = params.get("localSongs", ["false"])[0].lower() == "true"
-            self.respond_json(query_songs(query, decade, mood, offset, limit, local_songs))
+            self.respond_json(query_songs(query, decade, mood, offset, limit, local_songs, movie))
             return
 
         if parsed.path == "/api/song":

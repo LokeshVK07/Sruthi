@@ -90,6 +90,7 @@ async function handleApi(request, env, url, ctx) {
 
   if (url.pathname === "/api/library") {
     const query = cleanText(url.searchParams.get("query")).toLowerCase();
+    const movie = cleanText(url.searchParams.get("movie")).toLowerCase();
     const decade = cleanText(url.searchParams.get("decade")) || "all";
     const offset = toInt(url.searchParams.get("offset"), 0);
     const limit = Math.min(toInt(url.searchParams.get("limit"), 80), 120);
@@ -124,6 +125,11 @@ async function handleApi(request, env, url, ctx) {
       filters.push("(lower(title) LIKE ? OR lower(movie) LIKE ? OR lower(artist) LIKE ? OR lower(composer) LIKE ?)");
       const like = `%${query}%`;
       bindings.push(like, like, like, like);
+    }
+
+    if (movie) {
+      filters.push("lower(movie) = ?");
+      bindings.push(movie);
     }
 
     const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
