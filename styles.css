@@ -1328,13 +1328,23 @@ dd {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 42px;
+    width: 78px;
     height: 24px;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.08);
+    background: transparent;
     color: var(--muted);
-    font-size: 1.35rem;
+    font-size: 1rem;
     line-height: 1;
+    padding: 0;
+  }
+
+  .mobile-player-handle {
+    display: block;
+    width: 38px;
+    height: 5px;
+    border-radius: 999px;
+    background: rgba(211, 225, 255, 0.42);
+    box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08), 0 0 0 1px rgba(255, 255, 255, 0.02);
   }
 
   .player-bar-main {
@@ -1527,6 +1537,14 @@ dd {
     border-radius: 16px;
     display: grid;
     align-content: start;
+  }
+
+  .search-wrap input,
+  .select-wrap select,
+  .favorites-sort-wrap select,
+  .playlist-pick,
+  .mobile-player-playlist-wrap select {
+    font-size: 16px;
   }
 
   .player-avatar-wrap {

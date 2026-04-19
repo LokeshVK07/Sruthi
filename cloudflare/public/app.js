@@ -558,6 +558,9 @@ function currentCollectionTitle() {
 async function openAlbumView(movieName) {
   const movie = sanitizeText(movieName);
   if (!movie) return;
+  if (mobileMediaQuery.matches) {
+    setMobilePlayerExpanded(false);
+  }
   state.currentView = "all";
   state.currentPlaylistId = null;
   state.albumFilter = movie;
