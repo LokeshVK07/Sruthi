@@ -1011,22 +1011,23 @@ function songMatches(song, query) {
 }
 
 function filterClientSongs(songs) {
-  return songs
-    .filter((song) => {
-      if (state.decade !== "all") {
-        const decade = song.year ? `${Math.floor(song.year / 10) * 10}s` : "Unknown";
-        if (decade !== state.decade) return false;
-      }
-      if (state.localSongs && !(song.localAudio320Url || song.localAudio128Url)) return false;
-      if (!state.query) return true;
-      return songMatches(song, state.query) < 99;
-    })
-    .sort((a, b) => {
-      if (!state.query) return 0; // Preserve order from collectionIds/orderedFavorites
-      const matchRank = songMatches(a, state.query) - songMatches(b, state.query);
-      if (matchRank) return matchRank;
-      return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
-    });
+  const filtered = songs.filter((song) => {
+    if (state.decade !== "all") {
+      const decade = song.year ? `${Math.floor(song.year / 10) * 10}s` : "Unknown";
+      if (decade !== state.decade) return false;
+    }
+    if (state.localSongs && !(song.localAudio320Url || song.localAudio128Url)) return false;
+    if (!state.query) return true;
+    return songMatches(song, state.query) < 99;
+  });
+
+  if (!state.query) return filtered;
+
+  return filtered.sort((a, b) => {
+    const matchRank = songMatches(a, state.query) - songMatches(b, state.query);
+    if (matchRank) return matchRank;
+    return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
+  });
 }
 
 function collectionSongIds() {

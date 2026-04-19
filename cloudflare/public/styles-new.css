@@ -435,11 +435,11 @@ dt {
 }
 
 .player-meta {
-  display: flex;
-  justify-content: center;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 6px;
   z-index: 10;
+  width: 100%;
 }
 
 .player-meta div {
@@ -796,10 +796,19 @@ dd {
   .seek-shell { grid-column: 1 / -1; }
   .player-utility { grid-area: volume; justify-self: start; }
   
+  .seek-shell {
+    width: calc(100% + 20px); /* Span past the 10px + 10px container padding */
+    margin: 4px -10px -10px -10px; /* Pull to absolute edges and bottom */
+    padding: 8px 14px; /* Internal breathing room for timestamps */
+    background: rgba(0, 0, 0, 0.15); /* Subtle anchor for the bottom bar */
+    border-radius: 0 0 14px 14px;
+  }
+  
   .player-meta {
     position: absolute;
     top: 10px;
     right: 10px;
+    display: flex;
     flex-direction: column;
     padding: 6px;
     border-radius: 12px;
@@ -807,6 +816,8 @@ dd {
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     max-width: clamp(140px, 22vw, 240px);
+    width: auto;
+  }
   }
   
   .player-meta div {
@@ -850,11 +861,8 @@ dd {
   grid-template-columns: auto 1fr auto;
   gap: 12px;
   align-items: center;
-  width: calc(100% + 20px); /* Span past the 10px + 10px container padding */
-  margin: 4px -10px -10px -10px; /* Pull to absolute edges and bottom */
-  padding: 8px 14px; /* Internal breathing room for timestamps */
-  background: rgba(0, 0, 0, 0.15); /* Subtle anchor for the bottom bar */
-  border-radius: 0 0 14px 14px;
+  width: 100%;
+  margin-top: 4px;
 }
 
 .seek-bar {
