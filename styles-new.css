@@ -1893,6 +1893,27 @@ dd {
   font-size: 0.75rem;
 }
 
+.transport-right {
+  display: contents;
+}
+
+.transport-button svg,
+.queue-button svg,
+.heart-button svg,
+.mobile-mini-toggle svg {
+  width: 20px;
+  height: 20px;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.play-toggle svg {
+  width: 26px;
+  height: 26px;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
 /* Two-Layer Desktop Player UI overrides */
 @media (min-width: 1281px) {
   .player-bar {
