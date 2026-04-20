@@ -107,13 +107,22 @@
               <p id="now-artist">Select a track from the library.</p>
             </div>
 
-            <div class="player-meta-line">
-              <button id="now-movie" class="meta-link-button" type="button" disabled>-</button>
-              <span class="meta-divider">•</span>
-              <span id="now-year">-</span>
-              <span class="meta-divider">•</span>
-              <span id="now-composer">-</span>
-            </div>
+            <dl class="player-meta">
+              <div>
+                <dt>Movie</dt>
+                <dd>
+                  <button id="now-movie" class="meta-link-button" type="button" disabled>-</button>
+                </dd>
+              </div>
+              <div>
+                <dt>Year</dt>
+                <dd id="now-year">-</dd>
+              </div>
+              <div>
+                <dt>Composer</dt>
+                <dd id="now-composer">-</dd>
+              </div>
+            </dl>
           </div>
 
           <div class="player-transport">
@@ -157,29 +166,31 @@
               </select>
             </label>
 
-            <div class="seek-shell">
-              <span id="current-time" class="time-stamp">0:00</span>
-              <input id="seek-bar" class="seek-bar" type="range" min="0" max="100" value="0" step="0.1" aria-label="Seek playback" />
-              <span id="duration-time" class="time-stamp">0:00</span>
-            </div>
-
-            <div class="player-utility">
-              <label class="volume-wrap" for="volume-control">
-                <span class="volume-icon" aria-hidden="true">🔊</span>
-                <span class="volume-label">Volume</span>
-                <span class="sr-only">Adjust volume</span>
-                <input
-                  id="volume-control"
-                  class="volume-bar"
-                  type="range"
-                  min="0"
-                  max="100"
-                  value="85"
-                  step="1"
-                  aria-label="Volume"
-                />
-                <span id="volume-value" class="volume-value">85%</span>
-              </label>
+            <div class="transport-right">
+              <div class="seek-shell">
+                <span id="current-time" class="time-stamp">0:00</span>
+                <input id="seek-bar" class="seek-bar" type="range" min="0" max="100" value="0" step="0.1" aria-label="Seek playback" />
+                <span id="duration-time" class="time-stamp">0:00</span>
+              </div>
+  
+              <div class="player-utility">
+                <label class="volume-wrap" for="volume-control">
+                  <span class="volume-icon" aria-hidden="true">🔊</span>
+                  <span class="volume-label">Volume</span>
+                  <span class="sr-only">Adjust volume</span>
+                  <input
+                    id="volume-control"
+                    class="volume-bar"
+                    type="range"
+                    min="0"
+                    max="100"
+                    value="85"
+                    step="1"
+                    aria-label="Volume"
+                  />
+                  <span id="volume-value" class="volume-value">85%</span>
+                </label>
+              </div>
             </div>
           </div>
 
