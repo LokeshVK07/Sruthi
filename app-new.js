@@ -915,7 +915,8 @@ function renderQueuePanel() {
 
   const contextIds = getContext();
   const currentIndex = contextIds.indexOf(state.selectedSongId);
-  const upcomings = currentIndex >= 0 ? contextIds.slice(currentIndex + 1) : contextIds;
+  const upcomings = (currentIndex >= 0 ? contextIds.slice(currentIndex + 1) : contextIds)
+                      .filter(id => !state.queue.includes(id));
   let contextList = nodes.queueList.querySelector('.context-list');
   if (!contextList) {
     contextList = document.createElement("div");
@@ -942,7 +943,7 @@ function renderQueuePanel() {
             <strong>${song?.title || id}</strong>
           </span>
         </button>
-        <button class="queue-remove" type="button" aria-label="Remove from queue" style="visibility: hidden;">×</button>
+        <button class="queue-remove" type="button" aria-label="Skip track">×</button>
       `;
       contextList.append(row);
     });
@@ -969,7 +970,7 @@ function renderQueuePanel() {
         draggable: '.queue-row',
         ghostClass: 'sortable-ghost',
         onEnd: function () {
-          const domNodes = Array.from(manualList.querySelectorAll('.queue-row'));
+          const domNodes = Array.from(nodes.queueList.querySelectorAll('.queue-row'));
           state.queue = domNodes.map(el => el.dataset.songId);
           saveQueue();
           renderSongs();
@@ -979,11 +980,18 @@ function renderQueuePanel() {
     }
     if (!window.contextSortable && contextList) {
       window.contextSortable = new Sortable(contextList, {
-        group: { name: 'queue', pull: true, put: false },
+        group: 'queue',
         animation: 150,
         handle: '.drag-handle',
         draggable: '.queue-row',
-        ghostClass: 'sortable-ghost'
+        ghostClass: 'sortable-ghost',
+        onEnd: function () {
+          const domNodes = Array.from(nodes.queueList.querySelectorAll('.queue-row'));
+          state.queue = domNodes.map(el => el.dataset.songId);
+          saveQueue();
+          renderSongs();
+          renderQueuePanel();
+        }
       });
     }
   }
