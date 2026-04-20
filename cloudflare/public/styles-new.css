@@ -1877,3 +1877,76 @@ dd {
 .queue-section-header:first-child {
   margin-top: 0;
 }
+
+.player-meta-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.8rem;
+  color: var(--muted);
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.meta-divider {
+  opacity: 0.4;
+  font-size: 0.75rem;
+}
+
+/* Single-Line Desktop Player UI overrides */
+@media (min-width: 1281px) {
+  .player-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: nowrap;
+    gap: 20px;
+    padding: 10px 16px;
+  }
+  
+  .player-bar-main {
+    flex: 0 0 auto;
+    max-width: 32%;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    grid-template-columns: unset;
+  }
+  
+  .player-meta-line {
+    flex-wrap: nowrap;
+    overflow: hidden;
+    margin-top: 4px;
+  }
+  
+  .player-copy p, .player-meta-line span, .meta-link-button {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  
+  .player-transport {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 16px;
+  }
+  
+  .player-actions, .player-options {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    grid-template-columns: unset;
+  }
+  
+  .seek-shell {
+    flex: 1;
+    max-width: 400px;
+    margin: 0;
+  }
+  
+  .player-utility {
+    margin: 0;
+  }
+}
