@@ -68,10 +68,8 @@ const nodes = {
   queueToggle: document.querySelector("#queue-toggle"),
   queuePanel: document.querySelector("#queue-panel"),
   queueCount: document.querySelector("#queue-count"),
-  queueNowPlaying: document.querySelector("#queue-now-playing"),
   queueList: document.querySelector("#queue-list"),
   queueClose: document.querySelector("#queue-close"),
-  queueClear: document.querySelector("#queue-clear"),
   queueBackdrop: document.querySelector("#queue-backdrop"),
   mobileModeToggle: document.querySelector("#mobile-mode-toggle"),
   mobileSpeedToggle: document.querySelector("#mobile-speed-toggle"),
@@ -849,8 +847,6 @@ function openSongContextMenu(songId, anchor) {
   positionSongContextMenu(anchor);
 }
 
-let queueSortable = null;
-
 function renderQueuePanel() {
   if (!nodes.queuePanel || !nodes.queueList || !nodes.queueCount || !nodes.queueToggle) return;
   const songs = queuedSongs();
@@ -860,40 +856,16 @@ function renderQueuePanel() {
   nodes.queueToggle.title = state.queue.length ? `Show queue (${state.queue.length})` : "Show queue";
   nodes.queueToggle.classList.toggle("is-open", queuePanelOpen);
   nodes.queuePanel.hidden = !queuePanelOpen;
-  
-  if (nodes.queueClear) nodes.queueClear.style.display = state.queue.length ? "inline-block" : "none";
   if (nodes.queueBackdrop) nodes.queueBackdrop.hidden = !queuePanelOpen || !mobileMediaQuery.matches;
-  
-  if (nodes.queueNowPlaying) {
-    nodes.queueNowPlaying.innerHTML = "";
-    if (state.selectedSongId) {
-      const nowSong = state.songCache.get(state.selectedSongId);
-      nodes.queueNowPlaying.innerHTML = `
-        <div class="queue-section-header">Now Playing</div>
-        <div class="queue-row is-now-playing">
-          <div class="queue-main">
-            <span class="queue-copy">
-              <strong>${nowSong?.title || state.selectedSongId}</strong>
-            </span>
-          </div>
-        </div>
-      `;
-    }
-  }
+  nodes.queueList.innerHTML = "";
 
-  let manualList = nodes.queueList.querySelector('.manual-list');
-  if (!manualList) {
-    manualList = document.createElement("div");
-    manualList.className = "manual-list queue-group";
-    nodes.queueList.append(manualList);
-  }
-  manualList.innerHTML = "";
-  
+  const fragment = document.createDocumentFragment();
+
   if (state.queue.length) {
     const queueHeader = document.createElement("div");
-    queueHeader.className = "queue-section-header manual-header";
+    queueHeader.className = "queue-section-header";
     queueHeader.textContent = "Up Next";
-    manualList.append(queueHeader);
+    fragment.append(queueHeader);
     
     songs.forEach((entry, index) => {
       const song = entry.song;
@@ -901,34 +873,26 @@ function renderQueuePanel() {
       row.className = "queue-row is-manual";
       row.dataset.songId = entry.id;
       row.innerHTML = `
-        <div class="drag-handle" aria-hidden="true">☰</div>
-        <button class="queue-main" type="button" style="grid-column: 2 / 2;">
+        <button class="queue-main" type="button">
           <span class="queue-copy">
             <strong>${song?.title || entry.id}</strong>
           </span>
         </button>
         <button class="queue-remove" type="button" aria-label="Remove from queue">×</button>
       `;
-      manualList.append(row);
+      fragment.append(row);
     });
   }
 
   const contextIds = getContext();
   const currentIndex = contextIds.indexOf(state.selectedSongId);
   const upcomings = currentIndex >= 0 ? contextIds.slice(currentIndex + 1) : contextIds;
-  let contextList = nodes.queueList.querySelector('.context-list');
-  if (!contextList) {
-    contextList = document.createElement("div");
-    contextList.className = "context-list queue-group";
-    nodes.queueList.append(contextList);
-  }
-  contextList.innerHTML = "";
-
+  
   if (upcomings.length) {
     const contextHeader = document.createElement("div");
-    contextHeader.className = "queue-section-header context-header";
+    contextHeader.className = "queue-section-header";
     contextHeader.textContent = "Next From Context";
-    contextList.append(contextHeader);
+    fragment.append(contextHeader);
 
     upcomings.forEach((id) => {
       const song = state.songCache.get(id);
@@ -936,57 +900,25 @@ function renderQueuePanel() {
       row.className = "queue-row is-context";
       row.dataset.songId = id;
       row.innerHTML = `
-        <div class="drag-handle" aria-hidden="true">☰</div>
-        <button class="queue-main" type="button" style="grid-column: 2 / 2;">
+        <button class="queue-main" type="button">
           <span class="queue-copy">
             <strong>${song?.title || id}</strong>
           </span>
         </button>
-        <button class="queue-remove" type="button" aria-label="Remove from queue" style="visibility: hidden;">×</button>
       `;
-      contextList.append(row);
+      fragment.append(row);
     });
   }
-
-  const oldEmpty = nodes.queueList.querySelector('.queue-empty');
-  if (oldEmpty) oldEmpty.remove();
 
   if (!state.queue.length && !upcomings.length) {
     const empty = document.createElement("div");
     empty.className = "queue-empty";
     empty.textContent = "No songs in queue yet.";
-    nodes.queueList.append(empty);
+    fragment.append(empty);
   }
 
+  nodes.queueList.append(fragment);
   positionQueuePanel();
-
-  if (window.Sortable && queuePanelOpen) {
-    if (!window.manualSortable && manualList) {
-      window.manualSortable = new Sortable(manualList, {
-        group: 'queue',
-        animation: 150,
-        handle: '.drag-handle',
-        draggable: '.queue-row',
-        ghostClass: 'sortable-ghost',
-        onEnd: function () {
-          const domNodes = Array.from(manualList.querySelectorAll('.queue-row'));
-          state.queue = domNodes.map(el => el.dataset.songId);
-          saveQueue();
-          renderSongs();
-          renderQueuePanel();
-        }
-      });
-    }
-    if (!window.contextSortable && contextList) {
-      window.contextSortable = new Sortable(contextList, {
-        group: { name: 'queue', pull: true, put: false },
-        animation: 150,
-        handle: '.drag-handle',
-        draggable: '.queue-row',
-        ghostClass: 'sortable-ghost'
-      });
-    }
-  }
 }
 
 async function addSongToQueue(songId) {
@@ -1006,18 +938,9 @@ function removeSongFromQueue(songId) {
   renderSongs();
 }
 
-function clearQueue() {
-  state.queue = [];
-  saveQueue();
-  renderQueuePanel();
-  renderSongs();
-}
-
 function orderedFavorites() {
   const items = [...state.favorites];
   switch (state.favoriteSort) {
-    case "recent":
-      return items.reverse();
     case "title":
       return items.sort((a, b) => sanitizeText(a.title).localeCompare(sanitizeText(b.title)));
     case "composer":
@@ -1025,7 +948,6 @@ function orderedFavorites() {
         const composerRank = sanitizeText(a.composer).localeCompare(sanitizeText(b.composer));
         return composerRank || sanitizeText(a.title).localeCompare(sanitizeText(b.title));
       });
-    case "manual":
     default:
       return items;
   }
@@ -1177,7 +1099,6 @@ function filterClientSongs(songs) {
       return songMatches(song, state.query) < 99;
     })
     .sort((a, b) => {
-      if (!state.query) return 0;
       const matchRank = songMatches(a, state.query) - songMatches(b, state.query);
       if (matchRank) return matchRank;
       return sanitizeText(a.title).localeCompare(sanitizeText(b.title));
@@ -1206,21 +1127,7 @@ async function loadCollectionView() {
         songs.forEach(syncFavoriteSnapshot);
         playlist.songIds = songIds;
         playlist.songCount = songIds.length;
-        const rawSongs = songIds.map((songId) => state.songCache.get(songId)).filter(Boolean);
-        const displayName = officialPlaylistDisplayName(playlist.name);
-        let filtered = rawSongs;
-
-        // Strict composer filtering for "Hits" playlists
-        if (displayName.endsWith(" Hits")) {
-          const targetComposer = displayName.replace(" Hits", "").toLowerCase().trim();
-          filtered = rawSongs.filter(song => {
-            const songComposer = (song.composer || "").toLowerCase();
-            const songArtist = (song.artist || "").toLowerCase();
-            return songComposer.includes(targetComposer) || songArtist.includes(targetComposer);
-          });
-        }
-
-        filtered = filterClientSongs(filtered);
+        const filtered = filterClientSongs(songIds.map((songId) => state.songCache.get(songId)).filter(Boolean));
         state.songs = filtered;
         state.totalSongs = filtered.length;
         state.hasMore = false;
@@ -1571,29 +1478,6 @@ function getPrevIndex() {
   return -1;
 }
 
-function generateSimilarSongs(sourceSong, limit = 15) {
-  if (!sourceSong) return [];
-  const songs = [...state.songCache.values()];
-  const avoidIds = new Set([...state.queue, state.selectedSongId, sourceSong.id]);
-  const candidates = songs.filter(song => {
-    if (avoidIds.has(song.id)) return false;
-    let match = false;
-    // Prefer composer match if available
-    if (sourceSong.composer && song.composer && sanitizeText(song.composer).includes(sanitizeText(sourceSong.composer))) match = true;
-    // Fallback to album or year
-    if (sourceSong.album && song.album === sourceSong.album) match = true;
-    if (sourceSong.year && song.year === sourceSong.year) match = true;
-    return match;
-  });
-  
-  // Deterministic randomize
-  for (let i = candidates.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
-  }
-  return candidates.slice(0, limit);
-}
-
 function nextSongByMode(direction = 1) {
   const ctx = getContext();
   if (!ctx.length) return null;
@@ -1604,18 +1488,6 @@ function nextSongByMode(direction = 1) {
     return state.songCache.get(nextQueuedId) || null;
   }
   const targetIndex = direction > 0 ? getNextIndex() : getPrevIndex();
-  
-  if (direction > 0 && targetIndex < 0) {
-    const similar = generateSimilarSongs(selectedSong());
-    if (similar.length) {
-      state.queue = similar.map(s => s.id);
-      const nextQueuedId = state.queue.shift();
-      saveQueue();
-      renderQueuePanel();
-      return state.songCache.get(nextQueuedId) || null;
-    }
-  }
-
   if (targetIndex < 0) return null;
   const nextId = ctx[targetIndex];
   return state.songCache.get(nextId) || null;
@@ -2244,11 +2116,6 @@ function bindEvents() {
   nodes.queueClose?.addEventListener("click", (event) => {
     event.stopPropagation();
     setQueuePanelOpen(false);
-  });
-
-  nodes.queueClear?.addEventListener("click", (event) => {
-    event.stopPropagation();
-    clearQueue();
   });
 
   nodes.queueBackdrop?.addEventListener("click", () => {

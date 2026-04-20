@@ -10,7 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -23,6 +23,7 @@ import server
 
 
 LISTING_PATH = "/tamil-songs?page={page}"
+MOVIE_INDEX_PATH = "/movie-index"
 CHALLENGE_MARKERS = (
     "just a moment",
     "cf-browser-verification",
@@ -43,6 +44,9 @@ def parse_args():
     parser.add_argument("--retry-count", type=int, default=3)
     parser.add_argument("--retry-base-delay", type=float, default=1.0)
     parser.add_argument("--stop-after-known-pages", type=int, default=2)
+    parser.add_argument("--skip-movie-index", action="store_true")
+    parser.add_argument("--include-tag-index", action="store_true")
+    parser.add_argument("--movie-index-stop-after-known-pages", type=int, default=120)
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--print-summary-only", action="store_true")
     return parser.parse_args()
@@ -251,6 +255,78 @@ def parse_listing_page(html, page_number):
         title = clean_text(text.split("Starring:")[0])
         candidates.append({"title": title, "url": to_absolute(href), "pageNumber": page_number})
     return unique_by(candidates, lambda item: item["url"])
+
+
+def make_seed(title, href, page_number=0):
+    absolute = to_absolute(href)
+    if not absolute:
+        return None
+    return {
+        "title": clean_text(title),
+        "url": absolute,
+        "pageNumber": page_number,
+    }
+
+
+def parse_movie_index_entry_paths(html, include_tag_index=False):
+    soup = BeautifulSoup(html, "html.parser")
+    paths = []
+    for link in soup.select("a[href]"):
+        href = clean_text(link.get("href"))
+        if not href:
+            continue
+        if "/browse-by-year/" in href:
+            paths.append(to_absolute(href))
+            continue
+        if include_tag_index and href.startswith("/tag/"):
+            paths.append(to_absolute(href))
+    return unique_by([path for path in paths if path], lambda item: item)
+
+
+def parse_directory_album_seeds(html, page_number=0):
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = []
+    for link in soup.select("a[href]"):
+        href = clean_text(link.get("href"))
+        text = clean_text(link.get_text(" ", strip=True))
+        if not href or not text:
+            continue
+        if href.startswith("#") or "/movie-index" in href or "/browse-by-year/" in href or href.startswith("/tag/"):
+            continue
+        if re.search(r"Search|Latest Updates|Movie Index|Telegram|Privacy Policy|Terms of use|Disclaimer|Contact|Tamil Songs|Hindi Songs|Telugu Songs|Malayalam Songs", text, re.I):
+            continue
+        if not re.search(r"(Starring:|Music:|Director:)", text, re.I):
+            continue
+        title = clean_text(text.split("Starring:")[0])
+        seed = make_seed(title, href, page_number=page_number)
+        if seed:
+            candidates.append(seed)
+    return unique_by(candidates, lambda item: item["url"])
+
+
+def parse_directory_pagination_paths(html, current_url):
+    soup = BeautifulSoup(html, "html.parser")
+    current = urlparse(current_url)
+    current_base = f"{current.scheme}://{current.netloc}{current.path}"
+    pagination = []
+
+    for link in soup.select("a[href]"):
+        href = clean_text(link.get("href"))
+        text = clean_text(link.get_text(" ", strip=True))
+        if not href or not text:
+            continue
+        if not re.fullmatch(r"[<>]|\d+", text):
+            continue
+        absolute = to_absolute(href)
+        if not absolute or absolute == current_url:
+            continue
+        parsed = urlparse(absolute)
+        absolute_base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        if absolute_base != current_base:
+            continue
+        pagination.append(absolute)
+
+    return unique_by(pagination, lambda item: item)
 
 
 def extract_album_tracks_from_html(html):
@@ -475,6 +551,59 @@ def build_album_seeds(session, args, processed_urls):
     return unique_by(discovered, lambda item: item["url"]), total_pages or page
 
 
+def build_movie_index_album_seeds(session, args, processed_urls):
+    if args.skip_movie_index:
+        return []
+
+    root_html = fetch_html(session, MOVIE_INDEX_PATH, args.retry_count, args.retry_base_delay)
+    entry_paths = parse_movie_index_entry_paths(root_html, include_tag_index=args.include_tag_index)
+    discovered = []
+    seen_album_urls = set()
+    seen_page_urls = set()
+    queue = list(entry_paths)
+    page_number = 0
+    consecutive_known_pages = 0
+
+    while queue:
+        page_url = queue.pop(0)
+        if page_url in seen_page_urls:
+            continue
+        seen_page_urls.add(page_url)
+        page_number += 1
+
+        html = fetch_html(session, page_url, args.retry_count, args.retry_base_delay)
+        seeds = parse_directory_album_seeds(html, page_number=page_number)
+        new_on_page = 0
+        for seed in seeds:
+            if seed["url"] in seen_album_urls:
+                continue
+            seen_album_urls.add(seed["url"])
+            discovered.append(seed)
+            if seed["url"] not in processed_urls:
+                new_on_page += 1
+
+        print(f"Movie index page {page_number}: {len(seeds)} albums, {new_on_page} new")
+
+        if new_on_page == 0:
+            consecutive_known_pages += 1
+        else:
+            consecutive_known_pages = 0
+
+        if not args.full and consecutive_known_pages >= max(1, args.movie_index_stop_after_known_pages):
+            print(
+                f"Movie index crawl stopped after {consecutive_known_pages} consecutive pages with no new albums."
+            )
+            break
+
+        for next_page in parse_directory_pagination_paths(html, page_url):
+            if next_page not in seen_page_urls:
+                queue.append(next_page)
+
+        sleep_with_jitter(args.page_delay, 0.1)
+
+    return unique_by(discovered, lambda item: item["url"])
+
+
 def refresh_albums(session, albums, args):
     updated = 0
     failed = []
@@ -525,13 +654,17 @@ def main():
 
     session = make_session()
     processed_urls = load_processed_urls()
-    album_seeds, total_pages = build_album_seeds(session, args, processed_urls)
+    listing_album_seeds, total_pages = build_album_seeds(session, args, processed_urls)
+    movie_index_album_seeds = build_movie_index_album_seeds(session, args, processed_urls)
+    album_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
     remaining = album_seeds if args.full else [album for album in album_seeds if album["url"] not in processed_urls]
 
     print(
         json.dumps(
             {
                 "listingPagesSeen": total_pages,
+                "listingDiscoveredAlbums": len(listing_album_seeds),
+                "movieIndexDiscoveredAlbums": len(movie_index_album_seeds),
                 "discoveredAlbums": len(album_seeds),
                 "knownAlbums": len(processed_urls),
                 "albumsToRefresh": len(remaining),
