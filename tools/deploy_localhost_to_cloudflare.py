@@ -68,12 +68,6 @@ def sync_public_bundle():
     ensure_file(source)
     shutil.copy2(source, destination)
 
-  # Keep -new assets aligned with the current localhost source of truth.
-  shutil.copy2(ROOT / "app.js", ROOT / "app-new.js")
-  shutil.copy2(ROOT / "styles.css", ROOT / "styles-new.css")
-  shutil.copy2(ROOT / "app.js", PUBLIC_DIR / "app-new.js")
-  shutil.copy2(ROOT / "styles.css", PUBLIC_DIR / "styles-new.css")
-
 
 def catalog_config(catalog: str):
   if catalog == "telugu":
