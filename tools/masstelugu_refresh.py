@@ -16,6 +16,8 @@ os.environ.setdefault("SRUTHI_CACHE_AUDIO_DIR", ".cache/audio-telugu")
 argv = sys.argv[1:]
 if "--origin" not in argv:
     argv = ["--origin", "https://masstelugu.com", *argv]
+if "--include-tag-index" not in argv:
+    argv = ["--include-tag-index", *argv]
 
 sys.argv = [str(TARGET), *argv]
 runpy.run_path(str(TARGET), run_name="__main__")

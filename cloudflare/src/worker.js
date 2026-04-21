@@ -1,6 +1,6 @@
 const SITE_ORIGIN = "https://www.masstamilan.dev";
 const DEFAULT_SYNC_PATH = "/sruthi-sync.json";
-const DEFAULT_OFFICIAL_PLAYLISTS = [
+const DEFAULT_TAMIL_OFFICIAL_PLAYLISTS = [
   { id: "top-100", name: "Top 100", sourceUrl: "https://www.masstamilan.dev/playlists/top-100-songs" },
   { id: "bgm-50", name: "BGM 50", sourceUrl: "https://www.masstamilan.dev/playlists/top-50-bgm-songs" },
   { id: "sai-top-50", name: "Sai Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/sai-abhyankkar-top-50-songs" },
@@ -17,6 +17,14 @@ const DEFAULT_OFFICIAL_PLAYLISTS = [
   { id: "harris-hits", name: "Harris Hits", sourceUrl: "https://www.masstamilan.dev/playlists/harris-jayaraj-top-50-songs" },
   { id: "g-v-prakash-top-50", name: "G. V. Prakash Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/g-v-prakash-kumar-top-50-songs" },
 ];
+
+function catalogLanguage(env) {
+  return cleanText(env?.CATALOG_LANGUAGE).toLowerCase() === "telugu" ? "telugu" : "tamil";
+}
+
+function defaultOfficialPlaylists(env) {
+  return catalogLanguage(env) === "telugu" ? [] : DEFAULT_TAMIL_OFFICIAL_PLAYLISTS;
+}
 
 export default {
   async fetch(request, env, ctx) {
@@ -835,7 +843,8 @@ async function listOfficialPlaylists(env, { includeSongIds = true } = {}) {
     ORDER BY lower(name) ASC
     `,
   ).all();
-  const results = (rows.results || []).length ? (rows.results || []) : DEFAULT_OFFICIAL_PLAYLISTS.map((playlist) => ({
+  const defaults = defaultOfficialPlaylists(env);
+  const results = (rows.results || []).length ? (rows.results || []) : defaults.map((playlist) => ({
     id: playlist.id,
     name: playlist.name,
     source_url: playlist.sourceUrl,
@@ -891,7 +900,7 @@ async function loadOfficialPlaylistDetail(env, playlistId) {
     `,
   ).bind(playlistId).first();
   if (!row) {
-    const fallback = DEFAULT_OFFICIAL_PLAYLISTS.find((playlist) => playlist.id === playlistId);
+    const fallback = defaultOfficialPlaylists(env).find((playlist) => playlist.id === playlistId);
     if (!fallback) return null;
     row = {
       id: fallback.id,

@@ -250,6 +250,7 @@ jobs:
           set -euo pipefail
           mkdir -p "${SRUTHI_DATA_DIR}" "${SRUTHI_MEDIA_DIR}" "${SRUTHI_CACHE_AUDIO_DIR}"
           args=(
+            --include-tag-index
             --workers 1
             --batch-size 1
             --page-delay 0.6

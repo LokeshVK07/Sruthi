@@ -6,6 +6,9 @@
     "directory": "public",
     "binding": "ASSETS"
   },
+  "vars": {
+    "CATALOG_LANGUAGE": "telugu"
+  },
   "d1_databases": [
     {
       "binding": "DB",

@@ -367,7 +367,7 @@ const playerAPI = {
     const song = selectedSong();
     return song ? {
       title: song.title || "Sruthi",
-      artist: song.artist || song.composer || "Tamil Music Vault",
+      artist: song.artist || song.composer || "Sruthi",
       album: song.movie || "Sruthi",
       artwork: [{ src: artworkUrlForSong(song), sizes: "512x512", type: "image/jpeg" }]
     } : null;
@@ -720,7 +720,6 @@ function loadHiddenOfficialPlaylistSongs() {
 async function loadOfficialPlaylists() {
   const sources = [
     "/api/playlists",
-    "https://sruthi.vklokesh70.workers.dev/api/playlists",
   ];
   for (const source of sources) {
     try {
@@ -1116,7 +1115,6 @@ async function loadCollectionView() {
     const playlist = currentPlaylist();
     const sources = [
       `/api/playlist?id=${encodeURIComponent(playlist.id)}`,
-      `https://sruthi.vklokesh70.workers.dev/api/playlist?id=${encodeURIComponent(playlist.id)}`,
     ];
     for (const source of sources) {
       try {
@@ -1536,7 +1534,7 @@ async function stepTrackFromExternal(direction) {
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
         title:   nextSong.title  || "Sruthi",
-        artist:  nextSong.artist || nextSong.composer || "Tamil Music Vault",
+        artist:  nextSong.artist || nextSong.composer || "Sruthi",
         album:   nextSong.movie  || "Sruthi",
         artwork: [{ src: artworkUrlForSong(nextSong), sizes: "512x512", type: "image/jpeg" }],
       });
