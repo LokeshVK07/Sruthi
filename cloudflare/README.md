@@ -20,16 +20,9 @@ The Worker in [src/worker.js](/Users/lokesh/Project_1/cloudflare/src/worker.js) 
 
 User playlists and favourites still stay in browser local storage.
 
-## Automatic Cloud Sync
+## Manual Worker Sync
 
-The Worker can now update the catalog automatically on Cloudflare with no Mac involved.
-
-How it works:
-
-- a Cloudflare cron trigger runs every 6 hours
-- the Worker fetches a MassTamilan-owned JSON feed from `SYNC_FEED_URL`
-- new albums and songs are upserted into D1
-- existing rows are refreshed in place
+The Worker still supports feed-based sync endpoints, but the scheduled production refresh now belongs in GitHub Actions so Tamil and Telugu can run independently with separate databases.
 
 ### Feed URL
 
@@ -202,9 +195,10 @@ That local release script will:
 
 ## GitHub Actions Background Refresh
 
-The repository now includes a safe background refresh workflow at:
+The repository now includes safe background refresh workflows at:
 
-- [.github/workflows/background-refresh.yml](/Users/lokesh/Project_1/.github/workflows/background-refresh.yml)
+- [.github/workflows/background-refresh.yml](/Users/lokesh/Project_1/.github/workflows/background-refresh.yml) for Tamil
+- [.github/workflows/background-refresh-telugu.yml](/Users/lokesh/Project_1/.github/workflows/background-refresh-telugu.yml) for Telugu
 
 How it works:
 
@@ -223,6 +217,11 @@ Required GitHub repository variables:
 - `SRUTHI_D1_DB_B_ID`
 - `SRUTHI_D1_DB_B_NAME`
 - `SRUTHI_ACTIVE_D1_SLOT`
+- `SRUTHI_TELUGU_D1_DB_A_ID`
+- `SRUTHI_TELUGU_D1_DB_A_NAME`
+- `SRUTHI_TELUGU_D1_DB_B_ID`
+- `SRUTHI_TELUGU_D1_DB_B_NAME`
+- `SRUTHI_TELUGU_ACTIVE_D1_SLOT`
 
 Required GitHub repository secret:
 
@@ -233,6 +232,11 @@ Optional GitHub repository variable:
 - `SRUTHI_UPDATE_COMMAND`
 
 `SRUTHI_UPDATE_COMMAND` is where you can plug in an existing non-interactive refresh command if you add one later. The current browser-console MassTamilan scrapers in [tools](/Users/lokesh/Project_1/tools) are still manual and are not run directly by GitHub Actions.
+
+Manual deploy helpers:
+
+- Tamil: [tools/deploy_localhost_to_cloudflare.py](/Users/lokesh/Project_1/tools/deploy_localhost_to_cloudflare.py)
+- Telugu: [tools/deploy_telugu_to_cloudflare.py](/Users/lokesh/Project_1/tools/deploy_telugu_to_cloudflare.py)
 
 ## Notes
 

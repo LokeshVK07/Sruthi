@@ -8,9 +8,26 @@
 */
 
 (async () => {
+  function inferSourceConfig(origin) {
+    const host = new URL(origin, location.origin).hostname.toLowerCase();
+    if (host.includes("masstelugu.com")) {
+      return {
+        sourceName: "MassTelugu",
+        listingPathTemplate: "/telugu-songs?page={page}",
+        movieIndexPath: "/movie-index",
+      };
+    }
+    return {
+      sourceName: "MassTamilan",
+      listingPathTemplate: "/tamil-songs?page={page}",
+      movieIndexPath: "/movie-index",
+    };
+  }
+
+  const SOURCE = inferSourceConfig(location.origin);
   const DEFAULTS = {
     startPage: 1,
-    endPage: 480,
+    endPage: null,
     pageDelayMs: 250,
     albumDelayMs: 250,
     sleepJitterMs: 180,
@@ -19,6 +36,10 @@
     fetchRetries: 3,
     retryBaseDelayMs: 800,
     apiBase: "http://127.0.0.1:8000",
+    includeTagIndex: false,
+    movieIndexStopAfterKnownPages: 120,
+    listingPathTemplate: SOURCE.listingPathTemplate,
+    movieIndexPath: SOURCE.movieIndexPath,
   };
   const CONFIG = { ...DEFAULTS, ...(window.SRUTHI_SCRAPER_CONFIG || {}) };
   const START_PAGE = CONFIG.startPage;
@@ -31,10 +52,19 @@
   const FETCH_RETRIES = CONFIG.fetchRetries;
   const RETRY_BASE_DELAY_MS = CONFIG.retryBaseDelayMs;
   const API_BASE = CONFIG.apiBase;
+  const INCLUDE_TAG_INDEX = Boolean(CONFIG.includeTagIndex);
+  const MOVIE_INDEX_STOP_AFTER_KNOWN_PAGES = Math.max(1, Number(CONFIG.movieIndexStopAfterKnownPages || 120));
+  const LISTING_PATH_TEMPLATE = CONFIG.listingPathTemplate;
+  const LISTING_BASE_PATH = LISTING_PATH_TEMPLATE.split("?")[0];
+  const MOVIE_INDEX_PATH = CONFIG.movieIndexPath;
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const parser = new DOMParser();
   const randomDelay = (base, jitter = SLEEP_JITTER_MS) => base + Math.floor(Math.random() * jitter);
+
+  function buildListingUrl(page) {
+    return LISTING_PATH_TEMPLATE.replace("{page}", String(page));
+  }
 
   function toAbsolute(url) {
     return new URL(url, location.origin).toString();
@@ -42,7 +72,12 @@
 
   function isChallengePage(html) {
     const lowered = (html || "").toLowerCase();
-    return lowered.includes("just a moment") || lowered.includes("cf-browser-verification") || lowered.includes("cloudflare");
+    return (
+      lowered.includes("just a moment") ||
+      lowered.includes("cf-browser-verification") ||
+      lowered.includes("checking your browser") ||
+      lowered.includes("enable javascript and cookies to continue")
+    );
   }
 
   async function withRetry(label, task) {
@@ -83,7 +118,7 @@
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ albums }),
+        body: JSON.stringify({ source: location.origin, albums }),
       });
 
       if (!response.ok) {
@@ -297,7 +332,7 @@
         const href = link.getAttribute("href");
         const text = cleanText(link.textContent);
         if (!href || !text) return null;
-        if (href.includes("/tamil-songs")) return null;
+        if (href.includes(LISTING_BASE_PATH)) return null;
         if (/Search|Latest Updates|Movie Index|Telegram|Privacy Policy|Terms of use|Disclaimer|Contact/i.test(text)) {
           return null;
         }
@@ -312,6 +347,76 @@
       .filter(Boolean);
 
     return uniqueBy(candidates, (item) => item.url);
+  }
+
+  function parseTotalPages(doc) {
+    const pages = new Set([START_PAGE]);
+    doc.querySelectorAll('a[href*="page="]').forEach((link) => {
+      const href = link.getAttribute("href") || "";
+      const match = href.match(/[?&]page=(\d+)/);
+      if (match) pages.add(Number.parseInt(match[1], 10));
+    });
+    return Math.max(...pages);
+  }
+
+  function parseMovieIndexEntryPaths(doc) {
+    const paths = [];
+    doc.querySelectorAll("a[href]").forEach((link) => {
+      const href = cleanText(link.getAttribute("href"));
+      if (!href) return;
+      if (href.includes("/browse-by-year/")) {
+        paths.push(toAbsolute(href));
+        return;
+      }
+      if (INCLUDE_TAG_INDEX && href.startsWith("/tag/")) {
+        paths.push(toAbsolute(href));
+      }
+    });
+    return uniqueBy(paths.filter(Boolean), (item) => item);
+  }
+
+  function makeSeed(title, href, pageNumber = 0) {
+    const url = toAbsolute(href);
+    if (!url) return null;
+    return {
+      title: cleanText(title),
+      url,
+      pageNumber,
+    };
+  }
+
+  function parseDirectoryAlbumSeeds(doc, pageNumber = 0) {
+    const candidates = [];
+    doc.querySelectorAll("a[href]").forEach((link) => {
+      const href = cleanText(link.getAttribute("href"));
+      const text = cleanText(link.textContent);
+      if (!href || !text) return;
+      if (href.startsWith("#") || href.includes("/movie-index") || href.includes("/browse-by-year/") || href.startsWith("/tag/")) return;
+      if (/Search|Latest Updates|Movie Index|Telegram|Privacy Policy|Terms of use|Disclaimer|Contact|Tamil Songs|Hindi Songs|Telugu Songs|Malayalam Songs/i.test(text)) return;
+      if (!/(Starring:|Music:|Director:)/i.test(text)) return;
+      const seed = makeSeed(text.split("Starring:")[0], href, pageNumber);
+      if (seed) candidates.push(seed);
+    });
+    return uniqueBy(candidates, (item) => item.url);
+  }
+
+  function parseDirectoryPaginationPaths(doc, currentUrl) {
+    const current = new URL(currentUrl, location.origin);
+    const currentBase = `${current.origin}${current.pathname}`;
+    const pagination = [];
+    doc.querySelectorAll("a[href]").forEach((link) => {
+      const href = cleanText(link.getAttribute("href"));
+      const text = cleanText(link.textContent);
+      if (!href || !text) return;
+      if (!/^(?:[<>]|\d+)$/.test(text)) return;
+      const absolute = toAbsolute(href);
+      if (!absolute || absolute === currentUrl) return;
+      const parsed = new URL(absolute, location.origin);
+      const absoluteBase = `${parsed.origin}${parsed.pathname}`;
+      if (absoluteBase !== currentBase) return;
+      pagination.push(absolute);
+    });
+    return uniqueBy(pagination, (item) => item);
   }
 
   function extractTrackIdFromUrl(url) {
@@ -428,23 +533,62 @@
     };
   }
 
-  console.log(`Collecting listing pages ${START_PAGE}-${END_PAGE}...`);
+  console.log(`Collecting ${SOURCE.sourceName} listing pages...`);
   console.log(`Using concurrency=${CONCURRENCY}, batchSize=${BATCH_SIZE}, retries=${FETCH_RETRIES}`);
-  const albumSeeds = [];
+  const processedUrls = await fetchProcessedUrls();
+  const listingAlbumSeeds = [];
+  const firstListingDoc = await fetchDocument(buildListingUrl(START_PAGE));
+  const detectedTotalPages = parseTotalPages(firstListingDoc);
+  const listingEndPage = END_PAGE == null ? detectedTotalPages : END_PAGE;
+  listingAlbumSeeds.push(...parseListingPage(firstListingDoc, START_PAGE));
+  console.log(`Listing page ${START_PAGE}/${listingEndPage}: +${listingAlbumSeeds.length} albums`);
+  await sleep(randomDelay(PAGE_DELAY_MS));
 
-  for (let page = START_PAGE; page <= END_PAGE; page += 1) {
-    const doc = await fetchDocument(`/tamil-songs?page=${page}`);
+  for (let page = START_PAGE + 1; page <= listingEndPage; page += 1) {
+    const doc = await fetchDocument(buildListingUrl(page));
     const parsed = parseListingPage(doc, page);
-    albumSeeds.push(...parsed);
-    console.log(`Listing page ${page}/${END_PAGE}: +${parsed.length} albums`);
+    listingAlbumSeeds.push(...parsed);
+    console.log(`Listing page ${page}/${listingEndPage}: +${parsed.length} albums`);
     await sleep(randomDelay(PAGE_DELAY_MS));
   }
 
-  const uniqueAlbums = uniqueBy(albumSeeds, (item) => item.url);
-  const processedUrls = await fetchProcessedUrls();
+  const movieIndexAlbums = [];
+  const seenMovieIndexPages = new Set();
+  const seenMovieIndexAlbums = new Set();
+  let consecutiveKnownPages = 0;
+  let movieIndexPageNumber = 0;
+  const movieIndexDoc = await fetchDocument(MOVIE_INDEX_PATH);
+  const movieIndexQueue = parseMovieIndexEntryPaths(movieIndexDoc);
+  while (movieIndexQueue.length) {
+    const pageUrl = movieIndexQueue.shift();
+    if (!pageUrl || seenMovieIndexPages.has(pageUrl)) continue;
+    seenMovieIndexPages.add(pageUrl);
+    movieIndexPageNumber += 1;
+    const doc = await fetchDocument(pageUrl);
+    const parsed = parseDirectoryAlbumSeeds(doc, movieIndexPageNumber);
+    let newOnPage = 0;
+    parsed.forEach((seed) => {
+      if (seenMovieIndexAlbums.has(seed.url)) return;
+      seenMovieIndexAlbums.add(seed.url);
+      movieIndexAlbums.push(seed);
+      if (!processedUrls.has(seed.url)) newOnPage += 1;
+    });
+    console.log(`Movie index page ${movieIndexPageNumber}: +${parsed.length} albums (${newOnPage} new)`);
+    consecutiveKnownPages = newOnPage === 0 ? consecutiveKnownPages + 1 : 0;
+    if (consecutiveKnownPages >= MOVIE_INDEX_STOP_AFTER_KNOWN_PAGES) {
+      console.log(`Stopping movie-index crawl after ${consecutiveKnownPages} pages with no new albums.`);
+      break;
+    }
+    parseDirectoryPaginationPaths(doc, pageUrl).forEach((nextPage) => {
+      if (!seenMovieIndexPages.has(nextPage)) movieIndexQueue.push(nextPage);
+    });
+    await sleep(randomDelay(PAGE_DELAY_MS));
+  }
+
+  const uniqueAlbums = uniqueBy([...listingAlbumSeeds, ...movieIndexAlbums], (item) => item.url);
   const remainingAlbums = uniqueAlbums.filter((album) => !processedUrls.has(album.url));
   console.log(
-    `Found ${uniqueAlbums.length} album pages. ${processedUrls.size} already stored locally. ${remainingAlbums.length} remaining.`
+    `Found ${uniqueAlbums.length} album pages (${listingAlbumSeeds.length} listing, ${movieIndexAlbums.length} movie index). ${processedUrls.size} already stored locally. ${remainingAlbums.length} remaining.`
   );
 
   async function fetchAlbumWithJitter(album, index, total) {

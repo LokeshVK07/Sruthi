@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List
 from urllib.parse import urljoin, urlparse
+from urllib.request import Request, urlopen
 
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -22,19 +23,30 @@ if str(ROOT) not in sys.path:
 import server
 
 
+SCRAPE_SITE_ORIGIN = server.SITE_ORIGIN
 LISTING_PATH = "/tamil-songs?page={page}"
 MOVIE_INDEX_PATH = "/movie-index"
 CHALLENGE_MARKERS = (
     "just a moment",
     "cf-browser-verification",
     "checking your browser",
-    "cloudflare",
+    "enable javascript and cookies to continue",
 )
 
 
+def default_listing_path(origin):
+    host = urlparse(clean_text(origin)).netloc.lower()
+    if "masstelugu.com" in host:
+        return "/telugu-songs?page={page}"
+    return "/tamil-songs?page={page}"
+
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="Refresh Sruthi from MassTamilan without browser automation.")
+    parser = argparse.ArgumentParser(description="Refresh Sruthi from a Mass* source without browser automation.")
     default_workers = max(4, min(16, os.cpu_count() or 4))
+    parser.add_argument("--origin", default=server.SITE_ORIGIN)
+    parser.add_argument("--listing-path", default=None)
+    parser.add_argument("--movie-index-path", default=MOVIE_INDEX_PATH)
     parser.add_argument("--start-page", type=int, default=1)
     parser.add_argument("--max-pages", type=int, default=800)
     parser.add_argument("--workers", type=int, default=default_workers)
@@ -71,7 +83,7 @@ def to_absolute(url):
     text = clean_text(url)
     if not text:
         return None
-    return urljoin(server.SITE_ORIGIN, text)
+    return urljoin(SCRAPE_SITE_ORIGIN, text)
 
 
 def escape_regex(value):
@@ -218,7 +230,21 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
             response.raise_for_status()
             html = response.text
             if is_challenge_page(html):
-                raise RuntimeError(f"Challenge page detected for {absolute}")
+                request = Request(
+                    absolute,
+                    headers={
+                        "User-Agent": server.UPSTREAM_USER_AGENT,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Cache-Control": "no-cache",
+                        "Pragma": "no-cache",
+                        "Upgrade-Insecure-Requests": "1",
+                    },
+                )
+                with urlopen(request, timeout=server.UPSTREAM_PAGE_TIMEOUT_SECONDS) as fallback_response:
+                    html = fallback_response.read().decode("utf-8", errors="ignore")
+                if is_challenge_page(html):
+                    raise RuntimeError(f"Challenge page detected for {absolute}")
             return html
         except Exception as error:  # noqa: BLE001
             last_error = error
@@ -638,7 +664,14 @@ def configure_server_paths():
 
 
 def main():
+    global SCRAPE_SITE_ORIGIN
+    global LISTING_PATH
+    global MOVIE_INDEX_PATH
+
     args = parse_args()
+    SCRAPE_SITE_ORIGIN = clean_text(args.origin).rstrip("/") or server.SITE_ORIGIN
+    LISTING_PATH = clean_text(args.listing_path) or default_listing_path(SCRAPE_SITE_ORIGIN)
+    MOVIE_INDEX_PATH = clean_text(args.movie_index_path) or "/movie-index"
     configure_server_paths()
     if args.workers <= 0:
         raise SystemExit("--workers must be greater than 0")
@@ -662,6 +695,8 @@ def main():
     print(
         json.dumps(
             {
+                "origin": SCRAPE_SITE_ORIGIN,
+                "listingPath": LISTING_PATH,
                 "listingPagesSeen": total_pages,
                 "listingDiscoveredAlbums": len(listing_album_seeds),
                 "movieIndexDiscoveredAlbums": len(movie_index_album_seeds),

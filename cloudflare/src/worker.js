@@ -427,7 +427,7 @@ async function tryRefreshSongLink(env, row) {
     let albumUrl = cleanText(row.album_url);
     let albumHtml = pageHtml;
     if (!pageHtml.includes("window.albumTracks")) {
-      const albumLinks = extractAlbumLinks(pageHtml);
+      const albumLinks = extractAlbumLinks(pageHtml, candidate);
       if (!albumLinks.length) continue;
       albumUrl = albumLinks[0];
       albumHtml = await fetchText(albumUrl);
@@ -639,9 +639,10 @@ function normalizeSong(song, album, index) {
     albumUrl,
     song?.imageUrl,
   ]);
-  const audio128 = absoluteUrl(song?.audio128Url || song?.audio_128_url || song?.audioUrl || song?.audio_url || song?.url128);
-  const audio320 = absoluteUrl(song?.audio320Url || song?.audio_320_url || song?.audioUrl || song?.audio_url || song?.url320);
-  const pageUrl = absoluteUrl(song?.songPageUrl || song?.song_page_url || song?.pageUrl || song?.sourceUrl);
+  const baseUrl = albumUrl || song?.sourceUrl || song?.songPageUrl || song?.imageUrl;
+  const audio128 = absoluteUrl(song?.audio128Url || song?.audio_128_url || song?.audioUrl || song?.audio_url || song?.url128, baseUrl);
+  const audio320 = absoluteUrl(song?.audio320Url || song?.audio_320_url || song?.audioUrl || song?.audio_url || song?.url320, baseUrl);
+  const pageUrl = absoluteUrl(song?.songPageUrl || song?.song_page_url || song?.pageUrl || song?.sourceUrl, baseUrl);
   return {
     id,
     albumUrl,
@@ -653,13 +654,13 @@ function normalizeSong(song, album, index) {
     year,
     mood: cleanText(song?.mood) || "Imported",
     songPageUrl: pageUrl,
-    sourceUrl: absoluteUrl(song?.sourceUrl || pageUrl || albumUrl),
-    imageUrl: absoluteUrl(song?.imageUrl || album?.imageUrl),
+    sourceUrl: absoluteUrl(song?.sourceUrl || pageUrl || albumUrl, baseUrl),
+    imageUrl: absoluteUrl(song?.imageUrl || album?.imageUrl, baseUrl),
     audioUrl: audio128 || audio320,
     audio128Url: audio128,
     audio320Url: audio320,
-    remoteAudio128Url: absoluteUrl(song?.remoteAudio128Url || song?.remote_audio_128_url),
-    remoteAudio320Url: absoluteUrl(song?.remoteAudio320Url || song?.remote_audio_320_url),
+    remoteAudio128Url: absoluteUrl(song?.remoteAudio128Url || song?.remote_audio_128_url, baseUrl),
+    remoteAudio320Url: absoluteUrl(song?.remoteAudio320Url || song?.remote_audio_320_url, baseUrl),
     localAudio128Url: cleanText(song?.localAudio128Url || song?.local_audio_128_url),
     localAudio320Url: cleanText(song?.localAudio320Url || song?.local_audio_320_url),
     downloadLinksJson: JSON.stringify(Array.isArray(song?.downloadLinks) ? song.downloadLinks : []),
@@ -1145,7 +1146,7 @@ function buildTrackPayload(track, context) {
     song_page_url: cleanText(track.songPageUrl) || context.albumUrl,
     source_url: context.albumUrl,
     image_url: cleanText(track.img_name)
-      ? `${SITE_ORIGIN}/uploads/album/${cleanText(track.img_name)}.jpg`
+      ? absoluteUrl(`/uploads/album/${cleanText(track.img_name)}.jpg`, context.albumUrl)
       : "",
     audio_url: audio320 || audio128,
     audio_128_url: audio128,
@@ -1170,11 +1171,13 @@ function extractBitrateLink(downloadLinks, bitrate) {
 
 async function fetchText(target) {
   if (!target) return "";
+  const referer = absoluteUrl(target) || originFromUrl(target);
   const response = await fetch(target, {
     headers: {
       Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "en-US,en;q=0.9",
-      Referer: SITE_ORIGIN,
+      Referer: referer,
+      Origin: originFromUrl(referer),
       "User-Agent":
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     },
@@ -1210,9 +1213,9 @@ function parseMusicDirector(html) {
   return match ? cleanText(match[1]).slice(0, 160) : "";
 }
 
-function extractAlbumLinks(html) {
+function extractAlbumLinks(html, baseUrl = SITE_ORIGIN) {
   const matches = [...html.matchAll(/href=["']([^"']*?-songs(?:\?[^"']*)?)["']/gi)];
-  return unique(matches.map((match) => absoluteUrl(match[1])).filter(Boolean));
+  return unique(matches.map((match) => absoluteUrl(match[1], baseUrl)).filter(Boolean));
 }
 
 function rowToSong(row) {
@@ -1245,12 +1248,22 @@ function rowToSong(row) {
   };
 }
 
-function absoluteUrl(value) {
+function originFromUrl(value, fallback = SITE_ORIGIN) {
+  const text = cleanText(value);
+  if (text.startsWith("http://") || text.startsWith("https://")) {
+    const parsed = new URL(text);
+    return `${parsed.protocol}//${parsed.host}`;
+  }
+  return cleanText(fallback) || SITE_ORIGIN;
+}
+
+function absoluteUrl(value, baseValue = SITE_ORIGIN) {
   const text = cleanText(value);
   if (!text) return "";
   if (text.startsWith("http://") || text.startsWith("https://")) return text;
-  if (text.startsWith("/")) return `${SITE_ORIGIN}${text}`;
-  return `${SITE_ORIGIN}/${text}`;
+  const origin = originFromUrl(baseValue);
+  if (text.startsWith("/")) return `${origin}${text}`;
+  return `${origin}/${text}`;
 }
 
 function stableSongId(albumUrl, title, trackNumber) {

@@ -1,0 +1,6 @@
+{
+  "minAlbumCount": 200,
+  "minSongCount": 1400,
+  "minPlayableSongCount": 1400,
+  "minDistinctMovieCount": 200
+}

@@ -17,15 +17,28 @@ from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent
-DATA_DIR = ROOT / "data"
+ENV_PATH = ROOT / ".env.local"
+
+
+def resolve_storage_path(env_name, default_relative_path):
+    configured = os.environ.get(env_name)
+    if not configured:
+        return ROOT / default_relative_path
+
+    path = Path(configured)
+    if path.is_absolute():
+        return path
+    return ROOT / path
+
+
+DATA_DIR = resolve_storage_path("SRUTHI_DATA_DIR", Path("data"))
 RAW_CATALOG_PATH = DATA_DIR / "catalog.json"
 INDEX_PATH = DATA_DIR / "catalog-index.json"
 STATUS_PATH = DATA_DIR / "catalog-status.json"
 DB_PATH = DATA_DIR / "sruthi.db"
 SITE_ORIGIN = "https://www.masstamilan.dev"
-ENV_PATH = ROOT / ".env.local"
-MEDIA_DIR = ROOT / "media"
-CACHE_AUDIO_DIR = ROOT / ".cache" / "audio"
+MEDIA_DIR = resolve_storage_path("SRUTHI_MEDIA_DIR", Path("media"))
+CACHE_AUDIO_DIR = resolve_storage_path("SRUTHI_CACHE_AUDIO_DIR", Path(".cache") / "audio")
 UPSTREAM_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -227,15 +240,39 @@ def as_int(value, default=0):
         return default
 
 
-def absolute_url(url):
+def origin_from_url(url, default=SITE_ORIGIN):
+    text = clean_text(url)
+    if text.startswith("http://") or text.startswith("https://"):
+        parsed = urlparse(text)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+    fallback = clean_text(default)
+    return fallback or SITE_ORIGIN
+
+
+def infer_catalog_source(albums, fallback=SITE_ORIGIN):
+    for album in albums or []:
+        origin = origin_from_url(album.get("url"))
+        if origin:
+            return origin
+        for track in album.get("tracks", []) or []:
+            for candidate in (track.get("songPageUrl"), track.get("imageUrl"), track.get("audio320Url"), track.get("audio128Url")):
+                origin = origin_from_url(candidate)
+                if origin:
+                    return origin
+    return origin_from_url(fallback)
+
+
+def absolute_url(url, base_origin=None):
     text = clean_text(url)
     if not text:
         return None
     if text.startswith("http://") or text.startswith("https://"):
         return text
+    origin = origin_from_url(base_origin)
     if text.startswith("/"):
-        return f"{SITE_ORIGIN}{text}"
-    return f"{SITE_ORIGIN}/{text.lstrip('/')}"
+        return f"{origin}{text}"
+    return f"{origin}/{text.lstrip('/')}"
 
 
 def infer_bitrate_url(url, bitrate):
@@ -411,8 +448,10 @@ def is_noise_song_payload(title, movie):
         for marker in (
             "verification successful",
             "verifying you are human",
-            "waiting for www.masstamilan.dev to respond",
+            "waiting for",
             "www.masstamilan.dev",
+            "masstamilan.dev",
+            "masstelugu.com",
         )
     )
 
@@ -577,12 +616,12 @@ def extract_album_tracks(blob):
         return []
 
 
-def normalize_download_links(download_links, fallback_audio_url=None):
+def normalize_download_links(download_links, fallback_audio_url=None, base_origin=None):
     normalized = []
     seen = set()
 
     def push_link(label, url, bitrate):
-        absolute = absolute_url(url)
+        absolute = absolute_url(url, base_origin)
         if not absolute or absolute in seen:
             return
         seen.add(absolute)
@@ -598,7 +637,7 @@ def normalize_download_links(download_links, fallback_audio_url=None):
     audio_320 = None
 
     for item in download_links or []:
-        url = absolute_url(item.get("url"))
+        url = absolute_url(item.get("url"), base_origin)
         bitrate = detect_bitrate(item.get("label"), url)
         push_link(item.get("label"), url, bitrate)
         if bitrate == 128 and not audio_128:
@@ -606,7 +645,7 @@ def normalize_download_links(download_links, fallback_audio_url=None):
         if bitrate == 320 and not audio_320:
             audio_320 = url
 
-    fallback = absolute_url(fallback_audio_url)
+    fallback = absolute_url(fallback_audio_url, base_origin)
     if fallback:
         if "/p128_cdn/" in fallback and not audio_128:
             audio_128 = fallback
@@ -633,8 +672,9 @@ def normalize_download_links(download_links, fallback_audio_url=None):
 
 
 def build_track_from_album_track(album, item, composer, year, index):
-    fallback_audio_url = absolute_url(item.get("dl_path"))
-    urls = normalize_download_links(item.get("downloadLinks"), fallback_audio_url)
+    album_origin = origin_from_url(album.get("url"))
+    fallback_audio_url = absolute_url(item.get("dl_path"), album_origin)
+    urls = normalize_download_links(item.get("downloadLinks"), fallback_audio_url, album_origin)
     image_name = clean_text(item.get("img_name"))
 
     return {
@@ -645,8 +685,8 @@ def build_track_from_album_track(album, item, composer, year, index):
         "composer": composer,
         "movie": short_text(clean_display_text(item.get("m_name") or album.get("title"), "Unknown movie"), 140),
         "year": year,
-        "songPageUrl": absolute_url(item.get("songPageUrl")) or album.get("url"),
-        "imageUrl": f"{SITE_ORIGIN}/uploads/album/{image_name}.jpg" if image_name else None,
+        "songPageUrl": absolute_url(item.get("songPageUrl"), album_origin) or album.get("url"),
+        "imageUrl": absolute_url(f"/uploads/album/{image_name}.jpg", album_origin) if image_name else None,
         "spotify": {
             "album": None,
             "popularity": None,
@@ -668,8 +708,9 @@ def should_include_fallback_track(track):
 
 def build_track_from_fallback_track(album, track, composer, year, index):
     fallback_audio_url = track.get("audioUrl") or track.get("previewUrl") or track.get("streamUrl")
-    urls = normalize_download_links(track.get("downloadLinks"), fallback_audio_url)
     artist = strip_after_labels(track.get("artist") or track.get("singers"), ["Length", "Downloads"])
+    album_origin = origin_from_url(album.get("url") or track.get("songPageUrl") or track.get("imageUrl"))
+    urls = normalize_download_links(track.get("downloadLinks"), fallback_audio_url, album_origin)
 
     return {
         "id": str(track.get("id") or f"{album.get('title', 'album')}-{index}"),
@@ -679,8 +720,8 @@ def build_track_from_fallback_track(album, track, composer, year, index):
         "composer": composer,
         "movie": short_text(clean_display_text(track.get("movie") or album.get("title"), "Unknown movie"), 140),
         "year": year,
-        "songPageUrl": absolute_url(track.get("songPageUrl")) or album.get("url") or urls["audioUrl"],
-        "imageUrl": absolute_url(track.get("imageUrl")) or album.get("imageUrl"),
+        "songPageUrl": absolute_url(track.get("songPageUrl"), album_origin) or album.get("url") or urls["audioUrl"],
+        "imageUrl": absolute_url(track.get("imageUrl"), album_origin) or album.get("imageUrl"),
         "spotify": track.get("spotify")
         or {
             "album": None,
@@ -691,11 +732,11 @@ def build_track_from_fallback_track(album, track, composer, year, index):
     }
 
 
-def normalize_zip_links(zip_links):
+def normalize_zip_links(zip_links, base_origin=None):
     normalized = []
     seen = set()
     for item in zip_links or []:
-        url = absolute_url(item.get("url"))
+        url = absolute_url(item.get("url"), base_origin)
         if not url or url in seen:
             continue
         seen.add(url)
@@ -747,7 +788,7 @@ def normalize_album(album):
         "director": short_text(director or "Unknown director", 180),
         "starring": short_text(starring or "", 220),
         "lyricists": short_text(lyricists or "", 220),
-        "zipLinks": normalize_zip_links(album.get("zipLinks")),
+        "zipLinks": normalize_zip_links(album.get("zipLinks"), album.get("url")),
         "tracks": tracks,
     }
 
@@ -1033,10 +1074,13 @@ def upsert_album_into_db(album_payload):
         meta_rows = dict(connection.execute("SELECT key, value FROM app_meta").fetchall())
         album_count = connection.execute("SELECT COUNT(*) FROM albums").fetchone()[0]
         track_count = connection.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
+        stored_source = clean_text(meta_rows.get("source"))
+        if album_count <= 1 or not stored_source or stored_source == SITE_ORIGIN:
+            stored_source = origin_from_url(album_url)
         connection.executemany(
             "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
             [
-                ("source", meta_rows.get("source", SITE_ORIGIN)),
+                ("source", stored_source or SITE_ORIGIN),
                 ("ingestedAt", meta_rows.get("ingestedAt") or updated_at),
                 ("updatedAt", updated_at),
                 ("albumCount", str(album_count)),
@@ -1130,8 +1174,9 @@ def write_runtime_catalog_files_from_db():
 def normalize_catalog(raw_catalog=None):
     payload = raw_catalog or load_raw_catalog()
     normalized_albums = [normalize_album(album) for album in payload.get("albums", [])]
+    source = clean_text(payload.get("source")) or infer_catalog_source(normalized_albums, SITE_ORIGIN)
     return {
-        "source": payload.get("source", SITE_ORIGIN),
+        "source": source,
         "ingestedAt": payload.get("ingestedAt") or utc_now(),
         "updatedAt": utc_now(),
         "albums": normalized_albums,
@@ -1146,7 +1191,7 @@ def save_catalog(raw_catalog):
     SONG_RECORD_CACHE.clear()
 
 
-def upsert_catalog_albums(albums):
+def upsert_catalog_albums(albums, source=None):
     raw_catalog = normalize_catalog()
     by_url = {album.get("url"): album for album in raw_catalog.get("albums", []) if album.get("url")}
 
@@ -1161,7 +1206,7 @@ def upsert_catalog_albums(albums):
         key=lambda album: (album.get("pageNumber") or 10**9, clean_text(album.get("title"))),
     )
     payload = {
-        "source": raw_catalog.get("source", SITE_ORIGIN),
+        "source": clean_text(source) or raw_catalog.get("source") or infer_catalog_source(merged_albums, SITE_ORIGIN),
         "ingestedAt": raw_catalog.get("ingestedAt") or utc_now(),
         "updatedAt": utc_now(),
         "albums": merged_albums,
@@ -1476,13 +1521,15 @@ def update_song_link_status(song_id, link_status, refreshed_at=None):
 
 
 def fetch_page_html(url):
+    target_url = absolute_url(url)
+    target_origin = origin_from_url(target_url)
     request = Request(
-        absolute_url(url),
+        target_url,
         headers={
             "User-Agent": UPSTREAM_USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": SITE_ORIGIN,
-            "Origin": SITE_ORIGIN,
+            "Referer": target_url or target_origin,
+            "Origin": target_origin,
             "Connection": "keep-alive",
         },
     )
@@ -1675,7 +1722,11 @@ def cache_song_audio(song_id):
                 continue
             attempted_urls.append(candidate_url)
             try:
-                response, head = open_upstream_audio_range(candidate_url, None)
+                response, head = open_upstream_audio_range(
+                    candidate_url,
+                    None,
+                    song.get("albumUrl") or song.get("sourceUrl"),
+                )
             except (HTTPError, URLError, TimeoutError, ValueError):
                 continue
 
@@ -1809,14 +1860,17 @@ def open_upstream_audio(url):
     return open_upstream_audio_range(url)
 
 
-def open_upstream_audio_range(url, range_header=None):
+def open_upstream_audio_range(url, range_header=None, referer_url=None):
+    target_url = absolute_url(url, referer_url)
+    referer = absolute_url(referer_url, target_url) or origin_from_url(target_url)
+    origin = origin_from_url(referer or target_url)
     request = Request(
-        url,
+        target_url,
         headers={
             "User-Agent": UPSTREAM_USER_AGENT,
             "Accept": "audio/mpeg,audio/*;q=0.9,*/*;q=0.8",
-            "Referer": SITE_ORIGIN,
-            "Origin": SITE_ORIGIN,
+            "Referer": referer,
+            "Origin": origin,
             "Connection": "keep-alive",
             **({"Range": range_header} if range_header else {}),
         },
@@ -2047,7 +2101,11 @@ class CatalogHandler(SimpleHTTPRequestHandler):
                 continue
             attempted_urls.append(candidate_url)
             try:
-                response, head = open_upstream_audio_range(candidate_url, range_header)
+                response, head = open_upstream_audio_range(
+                    candidate_url,
+                    range_header,
+                    song.get("albumUrl") or song.get("sourceUrl"),
+                )
                 should_cache = range_header is None or range_header.startswith("bytes=0-")
                 self.stream_upstream_audio(
                     response,
@@ -2068,7 +2126,11 @@ class CatalogHandler(SimpleHTTPRequestHandler):
                     continue
                 attempted_urls.append(candidate_url)
                 try:
-                    response, head = open_upstream_audio_range(candidate_url, range_header)
+                    response, head = open_upstream_audio_range(
+                        candidate_url,
+                        range_header,
+                        refreshed.get("albumUrl") or refreshed.get("sourceUrl"),
+                    )
                     should_cache = range_header is None or range_header.startswith("bytes=0-")
                     self.stream_upstream_audio(
                         response,
@@ -2212,7 +2274,7 @@ class CatalogHandler(SimpleHTTPRequestHandler):
                 self.respond_json({"error": "albums must be an array."}, HTTPStatus.BAD_REQUEST)
                 return
 
-            merged = upsert_catalog_albums(albums)
+            merged = upsert_catalog_albums(albums, source=payload.get("source"))
             ensure_index()
             self.respond_json(
                 {

@@ -43,7 +43,12 @@
 
   function isChallengePage(html) {
     const lowered = (html || "").toLowerCase();
-    return lowered.includes("just a moment") || lowered.includes("cf-browser-verification") || lowered.includes("cloudflare");
+    return (
+      lowered.includes("just a moment") ||
+      lowered.includes("cf-browser-verification") ||
+      lowered.includes("checking your browser") ||
+      lowered.includes("enable javascript and cookies to continue")
+    );
   }
 
   async function withRetry(label, task) {

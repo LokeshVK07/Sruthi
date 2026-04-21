@@ -1,4 +1,4 @@
-name: Background Refresh Tamil
+name: Background Refresh Telugu
 
 on:
   workflow_dispatch:
@@ -16,7 +16,7 @@ permissions:
   actions: write
 
 concurrency:
-  group: sruthi-background-refresh-tamil
+  group: sruthi-background-refresh-telugu
   cancel-in-progress: false
 
 defaults:
@@ -25,22 +25,25 @@ defaults:
 
 jobs:
   refresh-and-deploy:
-    name: Refresh and Deploy Tamil
+    name: Refresh and Deploy Telugu
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       GH_VARIABLES_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-      SRUTHI_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_ACTIVE_D1_SLOT }}
-      SRUTHI_D1_DB_A_ID: ${{ vars.SRUTHI_D1_DB_A_ID }}
-      SRUTHI_D1_DB_A_NAME: ${{ vars.SRUTHI_D1_DB_A_NAME }}
-      SRUTHI_D1_DB_B_ID: ${{ vars.SRUTHI_D1_DB_B_ID }}
-      SRUTHI_D1_DB_B_NAME: ${{ vars.SRUTHI_D1_DB_B_NAME }}
+      SRUTHI_TELUGU_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_TELUGU_ACTIVE_D1_SLOT }}
+      SRUTHI_TELUGU_D1_DB_A_ID: ${{ vars.SRUTHI_TELUGU_D1_DB_A_ID }}
+      SRUTHI_TELUGU_D1_DB_A_NAME: ${{ vars.SRUTHI_TELUGU_D1_DB_A_NAME }}
+      SRUTHI_TELUGU_D1_DB_B_ID: ${{ vars.SRUTHI_TELUGU_D1_DB_B_ID }}
+      SRUTHI_TELUGU_D1_DB_B_NAME: ${{ vars.SRUTHI_TELUGU_D1_DB_B_NAME }}
       WRANGLER_SEND_METRICS: "false"
-      GENERATED_WRANGLER_CONFIG: cloudflare/.generated/wrangler.deploy.jsonc
-      RELEASE_MANIFEST: cloudflare/.generated/release-manifest.json
-      RELEASE_DUCKDB: cloudflare/.generated/release-check.duckdb
+      GENERATED_WRANGLER_CONFIG: cloudflare/.generated/wrangler.deploy.telugu.jsonc
+      RELEASE_MANIFEST: cloudflare/.generated/release-manifest-telugu.json
+      RELEASE_DUCKDB: cloudflare/.generated/release-check-telugu.duckdb
+      TELUGU_DATA_DIR: data/telugu
+      TELUGU_MEDIA_DIR: media/telugu
+      TELUGU_CACHE_DIR: .cache/audio-telugu
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -70,10 +73,10 @@ jobs:
             CLOUDFLARE_API_TOKEN \
             GH_VARIABLES_TOKEN \
             CLOUDFLARE_ACCOUNT_ID \
-            SRUTHI_D1_DB_A_ID \
-            SRUTHI_D1_DB_A_NAME \
-            SRUTHI_D1_DB_B_ID \
-            SRUTHI_D1_DB_B_NAME; do
+            SRUTHI_TELUGU_D1_DB_A_ID \
+            SRUTHI_TELUGU_D1_DB_A_NAME \
+            SRUTHI_TELUGU_D1_DB_B_ID \
+            SRUTHI_TELUGU_D1_DB_B_NAME; do
             if [[ -z "${!key:-}" ]]; then
               missing+=("$key")
             fi
@@ -84,24 +87,24 @@ jobs:
             exit 1
           fi
 
-          if [[ "${SRUTHI_D1_DB_A_ID}" == "${SRUTHI_D1_DB_B_ID}" ]]; then
-            echo "::error::D1 slot A and B database ids must be different."
+          if [[ "${SRUTHI_TELUGU_D1_DB_A_ID}" == "${SRUTHI_TELUGU_D1_DB_B_ID}" ]]; then
+            echo "::error::Telugu D1 slot A and B database ids must be different."
             exit 1
           fi
 
-          if [[ "${SRUTHI_D1_DB_A_NAME}" == "${SRUTHI_D1_DB_B_NAME}" ]]; then
-            echo "::error::D1 slot A and B database names must be different."
+          if [[ "${SRUTHI_TELUGU_D1_DB_A_NAME}" == "${SRUTHI_TELUGU_D1_DB_B_NAME}" ]]; then
+            echo "::error::Telugu D1 slot A and B database names must be different."
             exit 1
           fi
 
-          if [[ -n "${SRUTHI_ACTIVE_D1_SLOT:-}" && "${SRUTHI_ACTIVE_D1_SLOT}" != "A" && "${SRUTHI_ACTIVE_D1_SLOT}" != "B" ]]; then
-            echo "::error::SRUTHI_ACTIVE_D1_SLOT must be A or B when configured."
+          if [[ -n "${SRUTHI_TELUGU_ACTIVE_D1_SLOT:-}" && "${SRUTHI_TELUGU_ACTIVE_D1_SLOT}" != "A" && "${SRUTHI_TELUGU_ACTIVE_D1_SLOT}" != "B" ]]; then
+            echo "::error::SRUTHI_TELUGU_ACTIVE_D1_SLOT must be A or B when configured."
             exit 1
           fi
 
           required_files=(
-            ".github/workflows/background-refresh.yml"
-            "cloudflare/wrangler.jsonc"
+            ".github/workflows/background-refresh-telugu.yml"
+            "cloudflare/wrangler.telugu.jsonc"
             "cloudflare/src/worker.js"
             "cloudflare/public/index.html"
             "cloudflare/public/app.js"
@@ -109,8 +112,8 @@ jobs:
             "cloudflare/scripts/render_wrangler_config.py"
             "cloudflare/scripts/prepare_release.py"
             "cloudflare/scripts/export_d1_sql.py"
-            "cloudflare/data/release-baseline.json"
-            "tools/masstamilan_refresh.py"
+            "cloudflare/data/release-baseline-telugu.json"
+            "tools/masstelugu_refresh.py"
             "server.py"
           )
 
@@ -139,18 +142,18 @@ jobs:
             exit 1
           fi
 
-      - name: Select inactive D1 slot
+      - name: Select inactive Telugu D1 slot
         run: |
           set -euo pipefail
-          active="${SRUTHI_ACTIVE_D1_SLOT:-A}"
+          active="${SRUTHI_TELUGU_ACTIVE_D1_SLOT:-A}"
           if [[ "$active" == "A" ]]; then
             target="B"
-            db_id="${SRUTHI_D1_DB_B_ID}"
-            db_name="${SRUTHI_D1_DB_B_NAME}"
+            db_id="${SRUTHI_TELUGU_D1_DB_B_ID}"
+            db_name="${SRUTHI_TELUGU_D1_DB_B_NAME}"
           else
             target="A"
-            db_id="${SRUTHI_D1_DB_A_ID}"
-            db_name="${SRUTHI_D1_DB_A_NAME}"
+            db_id="${SRUTHI_TELUGU_D1_DB_A_ID}"
+            db_name="${SRUTHI_TELUGU_D1_DB_A_NAME}"
           fi
 
           echo "TARGET_DB_ID=$db_id" >> "$GITHUB_ENV"
@@ -180,14 +183,14 @@ jobs:
           fi
 
           set +e
-          gh api "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" >/tmp/slot-var.json 2>/tmp/slot-var.err
+          gh api "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_TELUGU_ACTIVE_D1_SLOT" >/tmp/slot-var.json 2>/tmp/slot-var.err
           status=$?
           set -e
 
           if [[ $status -eq 0 ]]; then
-            echo "Verified repository variable API access for SRUTHI_ACTIVE_D1_SLOT."
+            echo "Verified repository variable API access for SRUTHI_TELUGU_ACTIVE_D1_SLOT."
           elif grep -q "404" /tmp/slot-var.err; then
-            echo "SRUTHI_ACTIVE_D1_SLOT does not exist yet; workflow will create it after a successful deploy."
+            echo "SRUTHI_TELUGU_ACTIVE_D1_SLOT does not exist yet; workflow will create it after a successful deploy."
           else
             echo "::error::GH_VARIABLES_TOKEN does not have the required repository variables access."
             cat /tmp/slot-var.err
@@ -199,16 +202,11 @@ jobs:
           set -euo pipefail
           mkdir -p "$(dirname "${GENERATED_WRANGLER_CONFIG}")"
           python cloudflare/scripts/render_wrangler_config.py \
-            --input cloudflare/wrangler.jsonc \
+            --input cloudflare/wrangler.telugu.jsonc \
             --output "${GENERATED_WRANGLER_CONFIG}" \
             --database-id "${TARGET_DB_ID}" \
             --database-name "${TARGET_DB_NAME}" \
             --account-id "${CLOUDFLARE_ACCOUNT_ID}"
-
-          if [[ ! -f "${GENERATED_WRANGLER_CONFIG}" ]]; then
-            echo "::error::Rendered Wrangler config was not created."
-            exit 1
-          fi
 
       - name: Validate rendered deployment config
         run: |
@@ -243,74 +241,67 @@ jobs:
           })
           PY
 
-      - name: Refresh catalog from MassTamilan
+      - name: Refresh Telugu catalog from MassTelugu
+        env:
+          SRUTHI_DATA_DIR: ${{ env.TELUGU_DATA_DIR }}
+          SRUTHI_MEDIA_DIR: ${{ env.TELUGU_MEDIA_DIR }}
+          SRUTHI_CACHE_AUDIO_DIR: ${{ env.TELUGU_CACHE_DIR }}
         run: |
           set -euo pipefail
-          workers="$(python - <<'PY'
-          import os
-          print(max(4, os.cpu_count() or 4))
-          PY
-          )"
-          batch_size="$(( workers * 4 ))"
-          args=(--workers "${workers}" --batch-size "${batch_size}")
+          mkdir -p "${SRUTHI_DATA_DIR}" "${SRUTHI_MEDIA_DIR}" "${SRUTHI_CACHE_AUDIO_DIR}"
+          args=(
+            --workers 1
+            --batch-size 1
+            --page-delay 0.6
+            --album-delay 1.2
+            --retry-count 5
+            --retry-base-delay 5
+          )
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
             args+=(--full)
           fi
-          python tools/masstamilan_refresh.py "${args[@]}"
+          python tools/masstelugu_refresh.py "${args[@]}"
 
-      - name: Validate refreshed local catalog files
+      - name: Validate refreshed local Telugu catalog files
         run: |
           set -euo pipefail
-          if [[ ! -f data/sruthi.db ]]; then
-            echo "::error::Expected data/sruthi.db to exist after refresh."
+          if [[ ! -f data/telugu/sruthi.db ]]; then
+            echo "::error::Expected data/telugu/sruthi.db to exist after refresh."
             exit 1
           fi
-          if [[ ! -s data/sruthi.db ]]; then
-            echo "::error::data/sruthi.db exists but is empty."
+          if [[ ! -s data/telugu/sruthi.db ]]; then
+            echo "::error::data/telugu/sruthi.db exists but is empty."
             exit 1
           fi
 
-      - name: Validate catalog and build release seed
+      - name: Validate Telugu catalog and build release seed
         run: |
           set -euo pipefail
           python cloudflare/scripts/prepare_release.py \
-            --db data/sruthi.db \
-            --seed cloudflare/data/seed.sql \
-            --baseline cloudflare/data/release-baseline.json \
+            --db data/telugu/sruthi.db \
+            --seed cloudflare/data/seed-telugu.sql \
+            --baseline cloudflare/data/release-baseline-telugu.json \
             --manifest "${RELEASE_MANIFEST}" \
             --duckdb-path "${RELEASE_DUCKDB}"
 
-          if [[ ! -f cloudflare/data/seed.sql ]]; then
-            echo "::error::Release seed was not generated."
-            exit 1
-          fi
-          if [[ ! -s cloudflare/data/seed.sql ]]; then
-            echo "::error::Release seed was generated but is empty."
-            exit 1
-          fi
-          if [[ ! -f "${RELEASE_MANIFEST}" ]]; then
-            echo "::error::Release manifest was not generated."
-            exit 1
-          fi
-
-      - name: Upload build artifacts
+      - name: Upload Telugu build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: sruthi-release
+          name: sruthi-telugu-release
           if-no-files-found: error
           path: |
-            cloudflare/data/seed.sql
+            cloudflare/data/seed-telugu.sql
             ${{ env.RELEASE_MANIFEST }}
 
-      - name: Import release into inactive D1 slot
+      - name: Import Telugu release into inactive D1 slot
         run: |
           set -euo pipefail
           npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
-            --file cloudflare/data/seed.sql \
+            --file cloudflare/data/seed-telugu.sql \
             --config "${GENERATED_WRANGLER_CONFIG}"
 
-      - name: Validate inactive D1 slot
+      - name: Validate inactive Telugu D1 slot
         run: |
           set -euo pipefail
           npx wrangler d1 execute "${TARGET_DB_NAME}" \
@@ -347,12 +338,12 @@ jobs:
           print({"albumCount": album_count, "songCount": song_count})
           PY
 
-      - name: Deploy Worker after successful import and validation
+      - name: Deploy Telugu Worker after successful import and validation
         run: |
           set -euo pipefail
           npx wrangler deploy --config "${GENERATED_WRANGLER_CONFIG}"
 
-      - name: Mark deployed D1 slot as active
+      - name: Mark deployed Telugu D1 slot as active
         env:
           GH_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
         run: |
@@ -368,33 +359,33 @@ jobs:
             exit 1
           fi
 
-          echo "Updating SRUTHI_ACTIVE_D1_SLOT to '${TARGET_SLOT}'."
+          echo "Updating SRUTHI_TELUGU_ACTIVE_D1_SLOT to '${TARGET_SLOT}'."
 
           set +e
           gh api \
             --method PATCH \
-            "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_ACTIVE_D1_SLOT" \
-            -f name=SRUTHI_ACTIVE_D1_SLOT \
+            "repos/${GITHUB_REPOSITORY}/actions/variables/SRUTHI_TELUGU_ACTIVE_D1_SLOT" \
+            -f name=SRUTHI_TELUGU_ACTIVE_D1_SLOT \
             -f value="${TARGET_SLOT}" >/tmp/slot-patch.out 2>/tmp/slot-patch.err
           patch_status=$?
           set -e
 
           if [[ $patch_status -eq 0 ]]; then
-            echo "Updated SRUTHI_ACTIVE_D1_SLOT successfully."
+            echo "Updated SRUTHI_TELUGU_ACTIVE_D1_SLOT successfully."
             exit 0
           fi
 
           if grep -q "404" /tmp/slot-patch.err; then
-            echo "SRUTHI_ACTIVE_D1_SLOT does not exist yet. Creating it now."
+            echo "SRUTHI_TELUGU_ACTIVE_D1_SLOT does not exist yet. Creating it now."
             gh api \
               --method POST \
               "repos/${GITHUB_REPOSITORY}/actions/variables" \
-              -f name=SRUTHI_ACTIVE_D1_SLOT \
+              -f name=SRUTHI_TELUGU_ACTIVE_D1_SLOT \
               -f value="${TARGET_SLOT}" >/tmp/slot-create.out 2>/tmp/slot-create.err
-            echo "Created SRUTHI_ACTIVE_D1_SLOT successfully."
+            echo "Created SRUTHI_TELUGU_ACTIVE_D1_SLOT successfully."
             exit 0
           fi
 
-          echo "::error::Failed to update SRUTHI_ACTIVE_D1_SLOT."
+          echo "::error::Failed to update SRUTHI_TELUGU_ACTIVE_D1_SLOT."
           cat /tmp/slot-patch.err
           exit 1

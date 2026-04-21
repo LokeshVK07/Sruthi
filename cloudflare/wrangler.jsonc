@@ -9,9 +9,6 @@
   "vars": {
     "SYNC_FEED_URL": "https://www.masstamilan.dev/sruthi-sync.json"
   },
-  "triggers": {
-    "crons": ["0 */6 * * *"]
-  },
   "d1_databases": [
     {
       "binding": "DB",

@@ -16,6 +16,12 @@ Database file:
 
 - [data/sruthi.db](/Users/lokesh/Project_1/data/sruthi.db)
 
+Alternate catalogs can be isolated with separate storage roots. The dedicated Telugu refresh wrapper writes to:
+
+- [data/telugu/sruthi.db](/Users/lokesh/Project_1/data/telugu/sruthi.db)
+- [media/telugu](/Users/lokesh/Project_1/media/telugu)
+- [.cache/audio-telugu](/Users/lokesh/Project_1/.cache/audio-telugu)
+
 The JSON files under [data](/Users/lokesh/Project_1/data) are still written as backup/export artifacts, but the app runtime now reads from SQLite-backed state.
 
 ## Run
@@ -64,20 +70,41 @@ It is designed to:
 - deploy only after validation succeeds
 - keep the current live site untouched if any step fails
 
-## MassTamilan direct export path
+## MassTamilan / MassTelugu direct export path
 
-MassTamilan is behind Cloudflare, so direct scraping from this workspace is blocked. The reliable path is:
+The same exporter logic now supports both:
+
+- `https://www.masstamilan.dev`
+- `https://masstelugu.com`
+
+The reliable browser-driven path is:
 
 1. Start the local site with `python3 server.py`.
 2. Keep [http://localhost:8000](http://localhost:8000) open.
-3. Open [https://www.masstamilan.dev/tamil-songs?page=1](https://www.masstamilan.dev/tamil-songs?page=1) in your browser.
+3. Open either [https://www.masstamilan.dev/tamil-songs?page=1](https://www.masstamilan.dev/tamil-songs?page=1) or [https://masstelugu.com/telugu-songs?page=1](https://masstelugu.com/telugu-songs?page=1) in your browser.
 4. Complete any Cloudflare or anti-bot check.
 5. Open DevTools console.
 6. Paste the script from [tools/masstamilan-direct-export.js](/Users/lokesh/Project_1/tools/masstamilan-direct-export.js).
-7. Let it crawl pages `1` through `480`.
+7. Let it crawl the detected listing pages plus the movie index pages for that site.
 8. The scraper will send albums directly into the local app at `http://127.0.0.1:8000/api/catalog/batch`.
 
 No JSON downloads are required for this flow. The integrated catalog is stored at [data/catalog.json](/Users/lokesh/Project_1/data/catalog.json) for the local site to read.
+
+For local scripted refreshes from this workspace:
+
+- [tools/masstamilan_refresh.py](/Users/lokesh/Project_1/tools/masstamilan_refresh.py) keeps using the default Tamil storage under [data](/Users/lokesh/Project_1/data).
+- [tools/masstelugu_refresh.py](/Users/lokesh/Project_1/tools/masstelugu_refresh.py) uses the same scraper logic but writes into the isolated Telugu storage roots above.
+
+To browse the Telugu catalog with the same UI and backend logic, run the server with:
+
+```bash
+SRUTHI_DATA_DIR=data/telugu SRUTHI_MEDIA_DIR=media/telugu SRUTHI_CACHE_AUDIO_DIR=.cache/audio-telugu python3 server.py
+```
+
+Cloud deployments are now intended to stay split the same way:
+
+- Tamil workflow/deploy: [.github/workflows/background-refresh.yml](/Users/lokesh/Project_1/.github/workflows/background-refresh.yml)
+- Telugu workflow/deploy: [.github/workflows/background-refresh-telugu.yml](/Users/lokesh/Project_1/.github/workflows/background-refresh-telugu.yml)
 
 ## Playback Model
 

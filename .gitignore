@@ -12,8 +12,12 @@ cloudflare/.wrangler/
 cloudflare/.generated/
 cloudflare/wrangler.deploy.jsonc
 cloudflare/data/seed.sql
+cloudflare/data/seed-telugu.sql
 cloudflare/data/*.duckdb
 data/*.db
 data/*.json
 data/*.db-shm
 data/*.db-wal
+data/backups/
+data/telugu/
+media/telugu/
