@@ -1,5 +1,7 @@
 const SITE_ORIGIN = "https://www.masstamilan.dev";
 const DEFAULT_SYNC_PATH = "/sruthi-sync.json";
+const TELUGU_ID_PREFIX = "telugu:";
+const TELUGU_LIBRARY_LIMIT = 2000;
 const DEFAULT_TAMIL_OFFICIAL_PLAYLISTS = [
   { id: "top-100", name: "Top 100", sourceUrl: "https://www.masstamilan.dev/playlists/top-100-songs" },
   { id: "bgm-50", name: "BGM 50", sourceUrl: "https://www.masstamilan.dev/playlists/top-50-bgm-songs" },
@@ -24,6 +26,288 @@ function catalogLanguage(env) {
 
 function defaultOfficialPlaylists(env) {
   return catalogLanguage(env) === "telugu" ? [] : DEFAULT_TAMIL_OFFICIAL_PLAYLISTS;
+}
+
+function teluguApiOrigin(env) {
+  if (catalogLanguage(env) !== "tamil") return "";
+  return cleanText(env?.TELUGU_API_ORIGIN);
+}
+
+function teluguAggregationEnabled(env) {
+  return Boolean(teluguApiOrigin(env));
+}
+
+function isTeluguSongId(songId) {
+  return cleanText(songId).startsWith(TELUGU_ID_PREFIX);
+}
+
+function rawTeluguSongId(songId) {
+  return cleanText(songId).slice(TELUGU_ID_PREFIX.length);
+}
+
+function prefixTeluguSongId(songId) {
+  const raw = cleanText(songId);
+  return raw ? `${TELUGU_ID_PREFIX}${raw}` : "";
+}
+
+async function fetchRemoteJson(url, init = {}) {
+  const response = await fetch(url, init);
+  if (!response.ok) {
+    throw new Error(`Remote request failed with ${response.status}`);
+  }
+  return response.json();
+}
+
+async function fetchTeluguResponse(env, path, init = {}) {
+  if (env.TELUGU_SERVICE && typeof env.TELUGU_SERVICE.fetch === "function") {
+    return env.TELUGU_SERVICE.fetch(new Request(`https://telugu.internal${path}`, init));
+  }
+  const base = teluguApiOrigin(env);
+  if (!base) {
+    throw new Error("Telugu catalog is unavailable.");
+  }
+  return fetch(`${base}${path}`, init);
+}
+
+function decorateTeluguSong(song) {
+  if (!song?.id) return null;
+  const prefixedId = prefixTeluguSongId(song.id);
+  return {
+    ...song,
+    id: prefixedId,
+    audioUrl: `/api/stream/${prefixedId}`,
+  };
+}
+
+async function fetchTeluguAppState(env) {
+  try {
+    const response = await fetchTeluguResponse(env, "/api/app-state");
+    if (!response.ok) return null;
+    return await response.json();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchTeluguLibrary(env, { query, movie, decade }) {
+  if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) {
+    return { songs: [], total: 0 };
+  }
+  const params = new URLSearchParams({
+    query,
+    movie,
+    decade,
+    localSongs: "false",
+    offset: "0",
+    limit: String(TELUGU_LIBRARY_LIMIT),
+  });
+  try {
+    const response = await fetchTeluguResponse(env, `/api/library?${params.toString()}`);
+    if (!response.ok) return { songs: [], total: 0 };
+    const payload = await response.json();
+    const songs = Array.isArray(payload?.songs) ? payload.songs.map(decorateTeluguSong).filter(Boolean) : [];
+    return {
+      songs,
+      total: Number(payload?.total || songs.length),
+    };
+  } catch {
+    return { songs: [], total: 0 };
+  }
+}
+
+async function fetchTeluguSong(env, songId) {
+  const rawId = rawTeluguSongId(songId);
+  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !rawId) return null;
+  try {
+    const response = await fetchTeluguResponse(env, `/api/song?id=${encodeURIComponent(rawId)}`);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    return decorateTeluguSong(payload);
+  } catch {
+    return null;
+  }
+}
+
+async function fetchTeluguSongsBatch(env, ids) {
+  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !ids.length) return [];
+  const rawIds = ids.map(rawTeluguSongId).filter(Boolean);
+  if (!rawIds.length) return [];
+  try {
+    const response = await fetchTeluguResponse(env, "/api/songs-batch", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ids: rawIds }),
+    });
+    if (!response.ok) return [];
+    const payload = await response.json();
+    return Array.isArray(payload?.songs) ? payload.songs.map(decorateTeluguSong).filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function proxyTeluguJson(env, path, init = {}) {
+  const base = teluguApiOrigin(env);
+  if (!base) return json({ error: "Telugu catalog is unavailable." }, 502);
+  try {
+    const payload = await fetchRemoteJson(`${base}${path}`, init);
+    return json(payload);
+  } catch {
+    return json({ error: "Telugu catalog is unavailable." }, 502);
+  }
+}
+
+async function proxyTeluguStream(env, request, rawId) {
+  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !rawId) return json({ error: "Song not found." }, 404);
+  const headers = new Headers();
+  const range = request.headers.get("Range");
+  if (range) headers.set("Range", range);
+  const upstream = await fetchTeluguResponse(env, `/api/stream/${encodeURIComponent(rawId)}`, {
+    method: "GET",
+    headers,
+    redirect: "follow",
+  }).catch(() => null);
+  if (!upstream) return json({ error: "Upstream stream unavailable." }, 502);
+  return withCors(upstream);
+}
+
+async function prefetchTeluguSongs(env, ids) {
+  const rawIds = ids.map(rawTeluguSongId).filter(Boolean);
+  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !rawIds.length) return 0;
+  try {
+    const response = await fetchTeluguResponse(env, "/api/prefetch", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ids: rawIds }),
+    });
+    if (!response.ok) return 0;
+    const payload = await response.json();
+    return Number(payload?.queued || 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function prefetchTeluguAlbum(env, songId, limit) {
+  const rawId = rawTeluguSongId(songId);
+  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !rawId) return 0;
+  try {
+    const response = await fetchTeluguResponse(env, "/api/prefetch/album", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ songId: rawId, limit }),
+    });
+    if (!response.ok) return 0;
+    const payload = await response.json();
+    return Number(payload?.queued || 0);
+  } catch {
+    return 0;
+  }
+}
+
+function librarySortValue(song, query) {
+  const normalizedQuery = cleanText(query).toLowerCase();
+  if (!normalizedQuery) {
+    return 10;
+  }
+  const title = cleanText(song?.title).toLowerCase();
+  const movie = cleanText(song?.movie).toLowerCase();
+  const artist = cleanText(song?.artist).toLowerCase();
+  const composer = cleanText(song?.composer).toLowerCase();
+  if (title === normalizedQuery) return 0;
+  if (title.startsWith(normalizedQuery)) return 1;
+  if (movie === normalizedQuery) return 2;
+  if (movie.startsWith(normalizedQuery)) return 3;
+  if (artist === normalizedQuery || artist.startsWith(normalizedQuery)) return 4;
+  if (composer === normalizedQuery || composer.startsWith(normalizedQuery)) return 5;
+  if (title.includes(normalizedQuery)) return 6;
+  if (movie.includes(normalizedQuery)) return 7;
+  if (artist.includes(normalizedQuery)) return 8;
+  if (composer.includes(normalizedQuery)) return 9;
+  return 10;
+}
+
+function compareLibrarySongs(left, right, query) {
+  const rankDelta = librarySortValue(left, query) - librarySortValue(right, query);
+  if (rankDelta) return rankDelta;
+  const yearDelta = Number(right?.year || 0) - Number(left?.year || 0);
+  if (yearDelta) return yearDelta;
+  return cleanText(left?.title).toLowerCase().localeCompare(cleanText(right?.title).toLowerCase());
+}
+
+async function queryLocalLibrary(env, { query, movie, decade, offset, limit }) {
+  const bindings = [];
+  const filters = [
+    "lower(title) NOT LIKE '%verifying you are human%'",
+    "lower(title) NOT LIKE '%verification successful%'",
+    "lower(movie) NOT LIKE '%www.masstamilan.dev%'",
+  ];
+
+  if (decade !== "all") {
+    const decadeStart = toInt(decade, 0);
+    if (decadeStart > 0) {
+      filters.push("year >= ? AND year < ?");
+      bindings.push(decadeStart, decadeStart + 10);
+    }
+  }
+
+  if (query) {
+    filters.push("(lower(title) LIKE ? OR lower(movie) LIKE ? OR lower(artist) LIKE ? OR lower(composer) LIKE ?)");
+    const like = `%${query}%`;
+    bindings.push(like, like, like, like);
+  }
+
+  if (movie) {
+    filters.push("lower(movie) = ?");
+    bindings.push(movie);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const rankSql = query
+    ? `
+      CASE
+        WHEN lower(title) = ? THEN 0
+        WHEN lower(title) LIKE ? THEN 1
+        WHEN lower(movie) = ? THEN 2
+        WHEN lower(movie) LIKE ? THEN 3
+        WHEN lower(artist) = ? OR lower(artist) LIKE ? THEN 4
+        WHEN lower(composer) = ? OR lower(composer) LIKE ? THEN 5
+        WHEN instr(lower(title), ?) > 0 THEN 6
+        WHEN instr(lower(movie), ?) > 0 THEN 7
+        WHEN instr(lower(artist), ?) > 0 THEN 8
+        WHEN instr(lower(composer), ?) > 0 THEN 9
+        ELSE 10
+      END
+    `
+    : "10";
+
+  const countStmt = env.DB.prepare(`SELECT COUNT(*) AS count FROM songs ${whereClause}`).bind(...bindings);
+  const rankBindings = query
+    ? [query, `${query}%`, query, `${query}%`, query, `${query}%`, query, `${query}%`, query, query, query, query]
+    : [];
+  const rowsStmt = env.DB.prepare(
+    `
+    SELECT id, album_url, title, artist, composer, movie, year, mood,
+           song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+           remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+    FROM songs
+    ${whereClause}
+    ORDER BY ${rankSql}, year DESC, lower(title) ASC
+    LIMIT ? OFFSET ?
+    `,
+  ).bind(...bindings, ...rankBindings, limit, offset);
+
+  const [countRow, rows] = await Promise.all([countStmt.first(), rowsStmt.all()]);
+  return {
+    total: Number(countRow?.count || 0),
+    songs: (rows.results || []).map((row) => rowToSong(row)),
+  };
 }
 
 export default {
@@ -62,7 +346,7 @@ async function handleApi(request, env, url, ctx) {
   }
 
   if (url.pathname === "/api/app-state") {
-    const [albumCountRow, trackCountRow, updatedRow, decadeRows] = await Promise.all([
+    const [albumCountRow, trackCountRow, updatedRow, decadeRows, teluguState] = await Promise.all([
       env.DB.prepare("SELECT COUNT(*) AS count FROM albums").first(),
       env.DB.prepare("SELECT COUNT(*) AS count FROM songs").first(),
       env.DB.prepare("SELECT MAX(updated_at) AS updatedAt FROM songs").first(),
@@ -74,19 +358,27 @@ async function handleApi(request, env, url, ctx) {
         ORDER BY decade ASC
         `,
       ).all(),
+      fetchTeluguAppState(env),
     ]);
 
-    const decades = (decadeRows.results || []).map((row) => `${row.decade}s`);
+    const decades = unique([
+      ...(decadeRows.results || []).map((row) => `${row.decade}s`),
+      ...((teluguState?.filters?.decades || []).map((item) => cleanText(item)).filter(Boolean)),
+    ]).sort();
+    const updatedAtCandidates = [updatedRow?.updatedAt, teluguState?.updatedAt]
+      .map((value) => cleanText(value))
+      .filter(Boolean)
+      .sort((left, right) => new Date(right).getTime() - new Date(left).getTime());
     return json({
       summary: {
-        albumCount: Number(albumCountRow?.count || 0),
-        trackCount: Number(trackCountRow?.count || 0),
+        albumCount: Number(albumCountRow?.count || 0) + Number(teluguState?.summary?.albumCount || 0),
+        trackCount: Number(trackCountRow?.count || 0) + Number(teluguState?.summary?.trackCount || 0),
       },
       filters: {
         decades,
         moods: ["Imported"],
       },
-      updatedAt: updatedRow?.updatedAt || null,
+      updatedAt: updatedAtCandidates[0] || null,
       refreshWorkerActive: false,
       refreshWorkerSeenAt: null,
       features: {
@@ -114,80 +406,46 @@ async function handleApi(request, env, url, ctx) {
       });
     }
 
-    const bindings = [];
-    const filters = [
-      "lower(title) NOT LIKE '%verifying you are human%'",
-      "lower(title) NOT LIKE '%verification successful%'",
-      "lower(movie) NOT LIKE '%www.masstamilan.dev%'",
-    ];
-
-    if (decade !== "all") {
-      const decadeStart = toInt(decade, 0);
-      if (decadeStart > 0) {
-        filters.push("year >= ? AND year < ?");
-        bindings.push(decadeStart, decadeStart + 10);
-      }
+    if (!teluguAggregationEnabled(env)) {
+      const payload = await queryLocalLibrary(env, { query, movie, decade, offset, limit });
+      return json({
+        songs: payload.songs,
+        total: payload.total,
+        offset,
+        limit,
+        hasMore: offset + limit < payload.total,
+      });
     }
 
-    if (query) {
-      filters.push("(lower(title) LIKE ? OR lower(movie) LIKE ? OR lower(artist) LIKE ? OR lower(composer) LIKE ?)");
-      const like = `%${query}%`;
-      bindings.push(like, like, like, like);
-    }
-
-    if (movie) {
-      filters.push("lower(movie) = ?");
-      bindings.push(movie);
-    }
-
-    const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-    const rankSql = query
-      ? `
-        CASE
-          WHEN lower(title) = ? THEN 0
-          WHEN lower(title) LIKE ? THEN 1
-          WHEN lower(movie) = ? THEN 2
-          WHEN lower(movie) LIKE ? THEN 3
-          WHEN lower(artist) = ? OR lower(artist) LIKE ? THEN 4
-          WHEN lower(composer) = ? OR lower(composer) LIKE ? THEN 5
-          WHEN instr(lower(title), ?) > 0 THEN 6
-          WHEN instr(lower(movie), ?) > 0 THEN 7
-          WHEN instr(lower(artist), ?) > 0 THEN 8
-          WHEN instr(lower(composer), ?) > 0 THEN 9
-          ELSE 10
-        END
-      `
-      : "10";
-
-    const countStmt = env.DB.prepare(`SELECT COUNT(*) AS count FROM songs ${whereClause}`).bind(...bindings);
-    const rankBindings = query
-      ? [query, `${query}%`, query, `${query}%`, query, `${query}%`, query, `${query}%`, query, query, query, query]
-      : [];
-    const rowsStmt = env.DB.prepare(
-      `
-      SELECT id, album_url, title, artist, composer, movie, year, mood,
-             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-      FROM songs
-      ${whereClause}
-      ORDER BY ${rankSql}, year DESC, lower(title) ASC
-      LIMIT ? OFFSET ?
-      `,
-    ).bind(...bindings, ...rankBindings, limit, offset);
-
-    const [countRow, rows] = await Promise.all([countStmt.first(), rowsStmt.all()]);
-    const songs = (rows.results || []).map((row) => rowToSong(row));
+    const teluguPayload = await fetchTeluguLibrary(env, { query, movie, decade });
+    const localOffset = Math.max(0, offset - teluguPayload.total);
+    const localLimit = Math.max(limit, offset + limit - localOffset);
+    const localPayload = await queryLocalLibrary(env, {
+      query,
+      movie,
+      decade,
+      offset: localOffset,
+      limit: localLimit,
+    });
+    const mergedSongs = [...localPayload.songs, ...teluguPayload.songs].sort((left, right) => compareLibrarySongs(left, right, query));
+    const songs = mergedSongs.slice(offset - localOffset, offset - localOffset + limit);
+    const total = localPayload.total + teluguPayload.total;
     return json({
       songs,
-      total: Number(countRow?.count || 0),
+      total,
       offset,
       limit,
-      hasMore: offset + limit < Number(countRow?.count || 0),
+      hasMore: offset + limit < total,
     });
   }
 
   if (url.pathname === "/api/song") {
     const songId = cleanText(url.searchParams.get("id"));
+    if (isTeluguSongId(songId)) {
+      const song = await fetchTeluguSong(env, songId);
+      if (!song) return json({ error: "Song not found." }, 404);
+      return json(song);
+    }
     const row = await env.DB.prepare(
       `
       SELECT id, album_url, title, artist, composer, movie, year, mood,
@@ -206,17 +464,29 @@ async function handleApi(request, env, url, ctx) {
     const payload = await request.json().catch(() => ({}));
     const ids = Array.isArray(payload?.ids) ? [...new Set(payload.ids.map(cleanText).filter(Boolean))].slice(0, 1200) : [];
     if (!ids.length) return json({ songs: [] });
-    const placeholders = ids.map(() => "?").join(", ");
-    const rows = await env.DB.prepare(
-      `
-      SELECT id, album_url, title, artist, composer, movie, year, mood,
-             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-      FROM songs
-      WHERE id IN (${placeholders})
-      `,
-    ).bind(...ids).all();
-    const byId = new Map((rows.results || []).map((row) => [cleanText(row.id), rowToSong(row)]));
+    const tamilIds = ids.filter((id) => !isTeluguSongId(id));
+    const teluguIds = ids.filter((id) => isTeluguSongId(id));
+    const byId = new Map();
+
+    if (tamilIds.length) {
+      const placeholders = tamilIds.map(() => "?").join(", ");
+      const rows = await env.DB.prepare(
+        `
+        SELECT id, album_url, title, artist, composer, movie, year, mood,
+               song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+               remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+        FROM songs
+        WHERE id IN (${placeholders})
+        `,
+      ).bind(...tamilIds).all();
+      (rows.results || []).forEach((row) => byId.set(cleanText(row.id), rowToSong(row)));
+    }
+
+    if (teluguIds.length) {
+      const teluguSongs = await fetchTeluguSongsBatch(env, teluguIds);
+      teluguSongs.forEach((song) => byId.set(cleanText(song.id), song));
+    }
+
     return json({ songs: ids.map((id) => byId.get(id)).filter(Boolean) });
   }
 
@@ -302,18 +572,30 @@ async function handleApi(request, env, url, ctx) {
     const payload = await request.json().catch(() => ({}));
     const ids = Array.isArray(payload?.ids) ? [...new Set(payload.ids.map(cleanText).filter(Boolean))].slice(0, 6) : [];
     if (!ids.length) return json({ ok: true, queued: 0 });
-    const placeholders = ids.map(() => "?").join(", ");
-    const rows = await env.DB.prepare(
-      `
-      SELECT id, album_url, title, artist, composer, movie, year, mood,
-             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-      FROM songs
-      WHERE id IN (${placeholders})
-      `,
-    ).bind(...ids).all();
-    ctx?.waitUntil(warmSongs(env, url.origin, rows.results || []));
-    return json({ ok: true, queued: (rows.results || []).length });
+    const tamilIds = ids.filter((id) => !isTeluguSongId(id));
+    const teluguIds = ids.filter((id) => isTeluguSongId(id));
+    let queued = 0;
+
+    if (tamilIds.length) {
+      const placeholders = tamilIds.map(() => "?").join(", ");
+      const rows = await env.DB.prepare(
+        `
+        SELECT id, album_url, title, artist, composer, movie, year, mood,
+               song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+               remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+        FROM songs
+        WHERE id IN (${placeholders})
+        `,
+      ).bind(...tamilIds).all();
+      queued += (rows.results || []).length;
+      ctx?.waitUntil(warmSongs(env, url.origin, rows.results || []));
+    }
+
+    if (teluguIds.length) {
+      queued += await prefetchTeluguSongs(env, teluguIds);
+    }
+
+    return json({ ok: true, queued });
   }
 
   if (url.pathname === "/api/prefetch/album") {
@@ -321,6 +603,10 @@ async function handleApi(request, env, url, ctx) {
     const songId = cleanText(payload?.songId);
     const limit = Math.min(Math.max(Number(payload?.limit || 4), 1), 8);
     if (!songId) return json({ ok: true, queued: 0 });
+    if (isTeluguSongId(songId)) {
+      const queued = await prefetchTeluguAlbum(env, songId, limit);
+      return json({ ok: true, queued });
+    }
     const current = await env.DB.prepare("SELECT album_url FROM songs WHERE id = ?").bind(songId).first();
     if (!current?.album_url) return json({ ok: true, queued: 0 });
     const rows = await env.DB.prepare(
@@ -340,6 +626,9 @@ async function handleApi(request, env, url, ctx) {
 
   if (url.pathname.startsWith("/api/stream/")) {
     const songId = cleanText(url.pathname.split("/").pop());
+    if (isTeluguSongId(songId)) {
+      return proxyTeluguStream(env, request, rawTeluguSongId(songId));
+    }
     return handleStream(songId, request, env, ctx);
   }
 
@@ -386,8 +675,9 @@ async function handleStream(songId, request, env, ctx) {
 
 async function tryAudioCandidates(row, request) {
   const range = request.headers.get("Range");
+  const baseUrl = cleanText(row.album_url || row.song_page_url || row.source_url);
   for (const candidate of [row.audio_128_url, row.audio_320_url]) {
-    const target = absoluteUrl(candidate);
+    const target = absoluteUrl(candidate, baseUrl);
     if (!target) continue;
     const upstream = await fetchAudio(target, row.album_url, range);
     if (upstream) return upstream;
@@ -1228,9 +1518,10 @@ function extractAlbumLinks(html, baseUrl = SITE_ORIGIN) {
 }
 
 function rowToSong(row) {
+  const baseUrl = cleanText(row.album_url || row.song_page_url || row.source_url);
   return {
     id: row.id,
-    albumUrl: row.album_url,
+    albumUrl: absoluteUrl(row.album_url, baseUrl),
     title: cleanText(row.title),
     artist: cleanText(row.artist),
     composer: cleanText(row.composer),
@@ -1238,14 +1529,14 @@ function rowToSong(row) {
     year: Number(row.year || 0) || inferYear(row.album_url, row.movie, row.title, row.image_url, row.source_url),
     mood: row.mood || "Imported",
     audioUrl: `/api/stream/${row.id}`,
-    audio128Url: absoluteUrl(row.audio_128_url),
-    audio320Url: absoluteUrl(row.audio_320_url),
-    remoteAudio128Url: absoluteUrl(row.remote_audio_128_url),
-    remoteAudio320Url: absoluteUrl(row.remote_audio_320_url),
+    audio128Url: absoluteUrl(row.audio_128_url, baseUrl),
+    audio320Url: absoluteUrl(row.audio_320_url, baseUrl),
+    remoteAudio128Url: absoluteUrl(row.remote_audio_128_url, baseUrl),
+    remoteAudio320Url: absoluteUrl(row.remote_audio_320_url, baseUrl),
     localAudio128Url: null,
     localAudio320Url: null,
-    sourceUrl: row.source_url || row.song_page_url || row.album_url,
-    imageUrl: row.image_url,
+    sourceUrl: absoluteUrl(row.source_url || row.song_page_url || row.album_url, baseUrl),
+    imageUrl: absoluteUrl(row.image_url, baseUrl),
     downloadLinks: [],
     spotify: {
       album: null,
