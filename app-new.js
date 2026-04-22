@@ -21,6 +21,7 @@ const state = {
   playbackSpeed: 1,
   playbackCandidates: [],
   queue: [],
+  collectionAutoplayQueue: [],
   shuffleOrder: [],
   shuffleCursor: -1,
   summary: {
@@ -170,6 +171,19 @@ function syncVolumeUi() {
 
 function queueContains(songId) {
   return state.queue.includes(songId);
+}
+
+function shuffleSongIds(songIds) {
+  const ids = [...songIds];
+  for (let index = ids.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [ids[index], ids[swapIndex]] = [ids[swapIndex], ids[index]];
+  }
+  return ids;
+}
+
+function collectionAutoplayEnabled() {
+  return state.currentView === "favorites" || state.currentView === "playlist";
 }
 
 function playbackModeMeta(mode) {
@@ -778,7 +792,8 @@ function queuedSongs() {
 }
 
 async function ensureQueueSongsCached() {
-  await ensureSongsCached(state.queue.slice(0, 60));
+  const preview = collectionAutoplayEnabled() ? getCollectionAutoplayQueuePreview().slice(0, 60) : [];
+  await ensureSongsCached([...state.queue.slice(0, 60), ...preview]);
 }
 
 function closeSongContextMenu() {
@@ -914,8 +929,12 @@ function renderQueuePanel() {
 
   const contextIds = getContext();
   const currentIndex = contextIds.indexOf(state.selectedSongId);
+  const queuedIds = new Set(state.queue);
   const upcomings = (currentIndex >= 0 ? contextIds.slice(currentIndex + 1) : contextIds)
-                      .filter(id => !state.queue.includes(id));
+    .filter((id) => !queuedIds.has(id));
+  const continuationIds = getCollectionAutoplayQueuePreview()
+    .filter((id) => !queuedIds.has(id) && !upcomings.includes(id));
+  const contextPreview = [...upcomings, ...continuationIds];
   let contextList = nodes.queueList.querySelector('.context-list');
   if (!contextList) {
     contextList = document.createElement("div");
@@ -924,13 +943,13 @@ function renderQueuePanel() {
   }
   contextList.innerHTML = "";
 
-  if (upcomings.length) {
+  if (contextPreview.length) {
     const contextHeader = document.createElement("div");
     contextHeader.className = "queue-section-header context-header";
     contextHeader.textContent = "Next From Context";
     contextList.append(contextHeader);
 
-    upcomings.forEach((id) => {
+    contextPreview.forEach((id) => {
       const song = state.songCache.get(id);
       const row = document.createElement("div");
       row.className = "queue-row is-context";
@@ -951,7 +970,7 @@ function renderQueuePanel() {
   const oldEmpty = nodes.queueList.querySelector('.queue-empty');
   if (oldEmpty) oldEmpty.remove();
 
-  if (!state.queue.length && !upcomings.length) {
+  if (!state.queue.length && !contextPreview.length) {
     const empty = document.createElement("div");
     empty.className = "queue-empty";
     empty.textContent = "No songs in queue yet.";
@@ -1195,6 +1214,42 @@ function collectionSongIds() {
   if (state.currentView === "favorites") return orderedFavorites().map((item) => item.id);
   if (state.currentView === "playlist") return currentPlaylist()?.songIds || [];
   return [];
+}
+
+function buildCollectionAutoplayQueue() {
+  const ctx = getContext().filter(Boolean);
+  if (!collectionAutoplayEnabled() || !ctx.length) return [];
+  const queuedIds = new Set(state.queue);
+  const currentId = state.selectedSongId;
+  let pool = ctx.filter((id) => id && id !== currentId && !queuedIds.has(id));
+  if (!pool.length) {
+    pool = ctx.filter((id) => id && !queuedIds.has(id));
+  }
+  if (!pool.length) {
+    pool = ctx;
+  }
+  return shuffleSongIds(pool);
+}
+
+function getCollectionAutoplayQueuePreview() {
+  if (!collectionAutoplayEnabled()) return [];
+  const ctx = new Set(getContext().filter(Boolean));
+  const queuedIds = new Set(state.queue);
+  const currentId = state.selectedSongId;
+  state.collectionAutoplayQueue = state.collectionAutoplayQueue.filter((id, index, ids) => (
+    ctx.has(id) && !queuedIds.has(id) && id !== currentId && ids.indexOf(id) === index
+  ));
+  if (!state.collectionAutoplayQueue.length) {
+    state.collectionAutoplayQueue = buildCollectionAutoplayQueue();
+  }
+  return state.collectionAutoplayQueue;
+}
+
+function shiftCollectionAutoplaySong() {
+  const preview = getCollectionAutoplayQueuePreview();
+  if (!preview.length) return null;
+  const nextId = preview.shift();
+  return state.songCache.get(nextId) || null;
 }
 
 async function loadCollectionView() {
@@ -1612,6 +1667,11 @@ function nextSongByMode(direction = 1) {
   const targetIndex = direction > 0 ? getNextIndex() : getPrevIndex();
   
   if (direction > 0 && targetIndex < 0) {
+    const collectionNext = shiftCollectionAutoplaySong();
+    if (collectionNext) {
+      renderQueuePanel();
+      return collectionNext;
+    }
     const similar = generateSimilarSongs(selectedSong());
     if (similar.length) {
       state.queue = similar.map(s => s.id);
@@ -1774,6 +1834,8 @@ function peekNextSong() {
   const nextIdx = currentIndex + 1;
   if (nextIdx < ctx.length) return state.songCache.get(ctx[nextIdx]) || null;
   if (state.playbackMode === "repeat") return state.songCache.get(ctx[0]) || null;
+  const collectionPreview = getCollectionAutoplayQueuePreview();
+  if (collectionPreview.length) return state.songCache.get(collectionPreview[0]) || null;
   return null;
 }
 
@@ -1983,6 +2045,7 @@ function moveFavoriteToIndex(songId, targetIndex) {
 async function switchView(view, playlistId = null) {
   state.currentView = view;
   state.currentPlaylistId = playlistId;
+  state.collectionAutoplayQueue = [];
   state.albumFilter = "";
   state.offset = 0;
   state.query = "";
@@ -2005,6 +2068,7 @@ async function switchView(view, playlistId = null) {
 async function refreshCurrentView() {
   state.songs = [];
   state.songCache.clear();
+  state.collectionAutoplayQueue = [];
   state.offset = 0;
   state.hasMore = false;
   state.loading = false;
