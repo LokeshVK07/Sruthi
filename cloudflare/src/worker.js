@@ -2,6 +2,7 @@ const SITE_ORIGIN = "https://www.masstamilan.dev";
 const DEFAULT_SYNC_PATH = "/sruthi-sync.json";
 const TELUGU_ID_PREFIX = "telugu:";
 const TELUGU_LIBRARY_LIMIT = 2000;
+const HOMEPAGE_RECENT_WINDOW_DAYS = 30;
 const DEFAULT_TAMIL_OFFICIAL_PLAYLISTS = [
   { id: "top-100", name: "Top 100", sourceUrl: "https://www.masstamilan.dev/playlists/top-100-songs" },
   { id: "bgm-50", name: "BGM 50", sourceUrl: "https://www.masstamilan.dev/playlists/top-50-bgm-songs" },
@@ -233,7 +234,80 @@ function librarySortValue(song, query) {
   return 10;
 }
 
-function compareLibrarySongs(left, right, query) {
+function isHomepageLibraryRequest({ query, movie, decade }) {
+  return !cleanText(query) && !cleanText(movie) && cleanText(decade || "all") === "all";
+}
+
+function homepageSeedNumber() {
+  const now = new Date();
+  return (
+    (now.getUTCFullYear() * 10000)
+    + ((now.getUTCMonth() + 1) * 100)
+    + now.getUTCDate()
+  );
+}
+
+function homepageRecentCutoffIso() {
+  return new Date(Date.now() - HOMEPAGE_RECENT_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function homepageSongUpdatedAt(song) {
+  return cleanText(song?.updatedAt || song?.lastRefreshedAt);
+}
+
+function homepageSongTimestamp(song) {
+  const value = homepageSongUpdatedAt(song);
+  const timestamp = value ? new Date(value).getTime() : 0;
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function homepageSongIsRecent(song) {
+  const updatedAt = homepageSongUpdatedAt(song);
+  return Boolean(updatedAt && updatedAt >= homepageRecentCutoffIso());
+}
+
+function homepageSongIsTamil(song) {
+  return !isTeluguSongId(song?.id);
+}
+
+function homepageSongRandomScore(song) {
+  const source = `${homepageSeedNumber()}:${cleanText(song?.id)}:${cleanText(song?.movie)}:${cleanText(song?.title)}`;
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function compareHomepageSongs(left, right) {
+  const tamilDelta = Number(homepageSongIsTamil(right)) - Number(homepageSongIsTamil(left));
+  if (tamilDelta) return tamilDelta;
+
+  const recentDelta = Number(homepageSongIsRecent(right)) - Number(homepageSongIsRecent(left));
+  if (recentDelta) return recentDelta;
+
+  const updatedDelta = homepageSongTimestamp(right) - homepageSongTimestamp(left);
+  if (updatedDelta && (homepageSongIsRecent(left) || homepageSongIsRecent(right))) return updatedDelta;
+
+  const modernDelta = Number(Number(right?.year || 0) >= 2010) - Number(Number(left?.year || 0) >= 2010);
+  if (modernDelta) return modernDelta;
+
+  if (Number(left?.year || 0) >= 2010 && Number(right?.year || 0) >= 2010) {
+    const randomDelta = homepageSongRandomScore(left) - homepageSongRandomScore(right);
+    if (randomDelta) return randomDelta;
+  }
+
+  if (updatedDelta) return updatedDelta;
+  const yearDelta = Number(right?.year || 0) - Number(left?.year || 0);
+  if (yearDelta) return yearDelta;
+  return cleanText(left?.title).toLowerCase().localeCompare(cleanText(right?.title).toLowerCase());
+}
+
+function compareLibrarySongs(left, right, query, options = {}) {
+  if (options.homepage) {
+    return compareHomepageSongs(left, right);
+  }
   const rankDelta = librarySortValue(left, query) - librarySortValue(right, query);
   if (rankDelta) return rankDelta;
   const yearDelta = Number(right?.year || 0) - Number(left?.year || 0);
@@ -269,6 +343,7 @@ async function queryLocalLibrary(env, { query, movie, decade, offset, limit }) {
   }
 
   const whereClause = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const homepage = isHomepageLibraryRequest({ query, movie, decade });
   const rankSql = query
     ? `
       CASE
@@ -286,22 +361,48 @@ async function queryLocalLibrary(env, { query, movie, decade, offset, limit }) {
       END
     `
     : "10";
+  const homepageOrderSql = `
+    CASE WHEN coalesce(updated_at, last_refreshed_at, '') >= ? THEN 0 ELSE 1 END,
+    CASE
+      WHEN coalesce(updated_at, last_refreshed_at, '') >= ? THEN coalesce(updated_at, last_refreshed_at, '')
+      ELSE ''
+    END DESC,
+    CASE WHEN year >= 2010 THEN 0 ELSE 1 END,
+    CASE
+      WHEN year >= 2010 THEN (
+        abs(
+          (coalesce(unicode(substr(id, 1, 1)), 0) * 31) +
+          (coalesce(unicode(substr(id, -1, 1)), 0) * 17) +
+          (coalesce(unicode(substr(title, 1, 1)), 0) * 13) +
+          (coalesce(unicode(substr(movie, 1, 1)), 0) * 7) +
+          ${homepageSeedNumber()}
+        ) % 100000
+      )
+      ELSE 100000
+    END ASC,
+    coalesce(updated_at, last_refreshed_at, '') DESC,
+    year DESC,
+    lower(title) ASC
+  `;
 
   const countStmt = env.DB.prepare(`SELECT COUNT(*) AS count FROM songs ${whereClause}`).bind(...bindings);
   const rankBindings = query
     ? [query, `${query}%`, query, `${query}%`, query, `${query}%`, query, `${query}%`, query, query, query, query]
     : [];
+  const rowsBindings = homepage
+    ? [...bindings, homepageRecentCutoffIso(), homepageRecentCutoffIso(), limit, offset]
+    : [...bindings, ...rankBindings, limit, offset];
   const rowsStmt = env.DB.prepare(
     `
     SELECT id, album_url, title, artist, composer, movie, year, mood,
            song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-           remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+           remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status, updated_at
     FROM songs
     ${whereClause}
-    ORDER BY ${rankSql}, year DESC, lower(title) ASC
+    ORDER BY ${homepage ? homepageOrderSql : `${rankSql}, year DESC, lower(title) ASC`}
     LIMIT ? OFFSET ?
     `,
-  ).bind(...bindings, ...rankBindings, limit, offset);
+  ).bind(...rowsBindings);
 
   const [countRow, rows] = await Promise.all([countStmt.first(), rowsStmt.all()]);
   return {
@@ -417,6 +518,7 @@ async function handleApi(request, env, url, ctx) {
       });
     }
 
+    const homepage = isHomepageLibraryRequest({ query, movie, decade });
     const teluguPayload = await fetchTeluguLibrary(env, { query, movie, decade });
     const localOffset = Math.max(0, offset - teluguPayload.total);
     const localLimit = Math.max(limit, offset + limit - localOffset);
@@ -427,7 +529,8 @@ async function handleApi(request, env, url, ctx) {
       offset: localOffset,
       limit: localLimit,
     });
-    const mergedSongs = [...localPayload.songs, ...teluguPayload.songs].sort((left, right) => compareLibrarySongs(left, right, query));
+    const mergedSongs = [...localPayload.songs, ...teluguPayload.songs]
+      .sort((left, right) => compareLibrarySongs(left, right, query, { homepage }));
     const songs = mergedSongs.slice(offset - localOffset, offset - localOffset + limit);
     const total = localPayload.total + teluguPayload.total;
     return json({
@@ -1543,6 +1646,7 @@ function rowToSong(row) {
       popularity: null,
       previewAvailable: Boolean(row.audio_128_url || row.audio_320_url),
     },
+    updatedAt: row.updated_at || row.last_refreshed_at || null,
     lastRefreshedAt: row.last_refreshed_at || null,
     linkStatus: row.link_status || "unknown",
   };
