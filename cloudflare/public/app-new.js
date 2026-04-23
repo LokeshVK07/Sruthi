@@ -792,7 +792,7 @@ function queuedSongs() {
 }
 
 async function ensureQueueSongsCached() {
-  const preview = collectionAutoplayEnabled() ? getCollectionAutoplayQueuePreview().slice(0, 60) : [];
+  const preview = collectionAutoplayEnabled() ? getCollectionLoopPreview().slice(0, 60) : [];
   await ensureSongsCached([...state.queue.slice(0, 60), ...preview]);
 }
 
@@ -930,11 +930,10 @@ function renderQueuePanel() {
   const contextIds = getContext();
   const currentIndex = contextIds.indexOf(state.selectedSongId);
   const queuedIds = new Set(state.queue);
-  const upcomings = (currentIndex >= 0 ? contextIds.slice(currentIndex + 1) : contextIds)
-    .filter((id) => !queuedIds.has(id));
-  const continuationIds = getCollectionAutoplayQueuePreview()
-    .filter((id) => !queuedIds.has(id) && !upcomings.includes(id));
-  const contextPreview = [...upcomings, ...continuationIds];
+  const contextPreview = collectionAutoplayEnabled()
+    ? getCollectionLoopPreview()
+    : (currentIndex >= 0 ? contextIds.slice(currentIndex + 1) : contextIds)
+        .filter((id) => !queuedIds.has(id));
   let contextList = nodes.queueList.querySelector('.context-list');
   if (!contextList) {
     contextList = document.createElement("div");
@@ -1214,6 +1213,22 @@ function collectionSongIds() {
   if (state.currentView === "favorites") return orderedFavorites().map((item) => item.id);
   if (state.currentView === "playlist") return currentPlaylist()?.songIds || [];
   return [];
+}
+
+function collectionPlaybackLoops() {
+  return collectionAutoplayEnabled() && state.playbackMode === "normal";
+}
+
+function getCollectionLoopPreview() {
+  if (!collectionAutoplayEnabled()) return [];
+  const ctx = getContext().filter(Boolean);
+  if (!ctx.length) return [];
+  const currentIndex = ctx.indexOf(state.selectedSongId);
+  const looped = currentIndex >= 0
+    ? [...ctx.slice(currentIndex + 1), ...ctx.slice(0, currentIndex)]
+    : ctx;
+  const queuedIds = new Set(state.queue);
+  return looped.filter((id) => !queuedIds.has(id));
 }
 
 function buildCollectionAutoplayQueue() {
@@ -1608,6 +1623,7 @@ function getNextIndex() {
     return state.playbackMode === "repeat" ? 0 : -1;
   }
   if (currentIndex + 1 < ctx.length) return currentIndex + 1;
+  if (collectionPlaybackLoops()) return 0;
   if (state.playbackMode === "repeat") return 0;
   return -1;
 }
@@ -1628,6 +1644,7 @@ function getPrevIndex() {
     return state.playbackMode === "repeat" ? currentIndex : -1;
   }
   if (currentIndex > 0) return currentIndex - 1;
+  if (collectionPlaybackLoops()) return ctx.length - 1;
   if (state.playbackMode === "repeat") return ctx.length - 1;
   return -1;
 }
@@ -1667,18 +1684,15 @@ function nextSongByMode(direction = 1) {
   const targetIndex = direction > 0 ? getNextIndex() : getPrevIndex();
   
   if (direction > 0 && targetIndex < 0) {
-    const collectionNext = shiftCollectionAutoplaySong();
-    if (collectionNext) {
-      renderQueuePanel();
-      return collectionNext;
-    }
-    const similar = generateSimilarSongs(selectedSong());
-    if (similar.length) {
-      state.queue = similar.map(s => s.id);
-      const nextQueuedId = state.queue.shift();
-      saveQueue();
-      renderQueuePanel();
-      return state.songCache.get(nextQueuedId) || null;
+    if (!collectionAutoplayEnabled()) {
+      const similar = generateSimilarSongs(selectedSong());
+      if (similar.length) {
+        state.queue = similar.map(s => s.id);
+        const nextQueuedId = state.queue.shift();
+        saveQueue();
+        renderQueuePanel();
+        return state.songCache.get(nextQueuedId) || null;
+      }
     }
   }
 
@@ -1833,9 +1847,8 @@ function peekNextSong() {
   }
   const nextIdx = currentIndex + 1;
   if (nextIdx < ctx.length) return state.songCache.get(ctx[nextIdx]) || null;
+  if (collectionPlaybackLoops()) return state.songCache.get(ctx[0]) || null;
   if (state.playbackMode === "repeat") return state.songCache.get(ctx[0]) || null;
-  const collectionPreview = getCollectionAutoplayQueuePreview();
-  if (collectionPreview.length) return state.songCache.get(collectionPreview[0]) || null;
   return null;
 }
 

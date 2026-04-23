@@ -280,6 +280,35 @@ function homepageSongRandomScore(song) {
   return hash >>> 0;
 }
 
+function homepageSongAlbumKey(song) {
+  return cleanText(song?.albumUrl || song?.movie || song?.sourceUrl || song?.id).toLowerCase();
+}
+
+function diversifyHomepageSongs(songs) {
+  const buckets = new Map();
+  const orderedKeys = [];
+  songs.forEach((song) => {
+    const key = homepageSongAlbumKey(song);
+    if (!buckets.has(key)) {
+      buckets.set(key, []);
+      orderedKeys.push(key);
+    }
+    buckets.get(key).push(song);
+  });
+  const diversified = [];
+  while (diversified.length < songs.length) {
+    let appended = false;
+    for (const key of orderedKeys) {
+      const bucket = buckets.get(key);
+      if (!bucket?.length) continue;
+      diversified.push(bucket.shift());
+      appended = true;
+    }
+    if (!appended) break;
+  }
+  return diversified;
+}
+
 function compareHomepageSongs(left, right) {
   const tamilDelta = Number(homepageSongIsTamil(right)) - Number(homepageSongIsTamil(left));
   if (tamilDelta) return tamilDelta;
@@ -496,6 +525,7 @@ async function handleApi(request, env, url, ctx) {
     const offset = toInt(url.searchParams.get("offset"), 0);
     const limit = Math.min(toInt(url.searchParams.get("limit"), 80), 120);
     const localSongs = (url.searchParams.get("localSongs") || "false").toLowerCase() === "true";
+    const homepage = isHomepageLibraryRequest({ query, movie, decade });
 
     if (localSongs) {
       return json({
@@ -504,6 +534,39 @@ async function handleApi(request, env, url, ctx) {
         offset,
         limit,
         hasMore: false,
+      });
+    }
+
+    if (homepage) {
+      const poolLimit = Math.min(Math.max(offset + (limit * 4), limit * 4), 400);
+      if (!teluguAggregationEnabled(env)) {
+        const payload = await queryLocalLibrary(env, { query, movie, decade, offset: 0, limit: poolLimit });
+        const songs = diversifyHomepageSongs(payload.songs).slice(offset, offset + limit);
+        return json({
+          songs,
+          total: payload.total,
+          offset,
+          limit,
+          hasMore: offset + limit < payload.total,
+        });
+      }
+
+      const [localPayload, teluguPayload] = await Promise.all([
+        queryLocalLibrary(env, { query, movie, decade, offset: 0, limit: poolLimit }),
+        fetchTeluguLibrary(env, { query, movie, decade }),
+      ]);
+      const mergedSongs = diversifyHomepageSongs(
+        [...localPayload.songs, ...teluguPayload.songs]
+          .sort((left, right) => compareLibrarySongs(left, right, query, { homepage: true })),
+      );
+      const total = localPayload.total + teluguPayload.total;
+      const songs = mergedSongs.slice(offset, offset + limit);
+      return json({
+        songs,
+        total,
+        offset,
+        limit,
+        hasMore: offset + limit < total,
       });
     }
 
@@ -518,7 +581,6 @@ async function handleApi(request, env, url, ctx) {
       });
     }
 
-    const homepage = isHomepageLibraryRequest({ query, movie, decade });
     const teluguPayload = await fetchTeluguLibrary(env, { query, movie, decade });
     const localOffset = Math.max(0, offset - teluguPayload.total);
     const localLimit = Math.max(limit, offset + limit - localOffset);
