@@ -893,6 +893,45 @@ def build_song_from_track(album, track):
     }
 
 
+def song_identity_key(value):
+    return re.sub(r"[^a-z0-9]+", " ", clean_text(value).lower()).strip()
+
+
+def build_existing_album_song_maps(connection, album_url):
+    rows = connection.execute(
+        """
+        SELECT id, title, song_page_url, source_url
+        FROM songs
+        WHERE album_url = ?
+        """,
+        (album_url,),
+    ).fetchall()
+    existing_by_page_url = {}
+    existing_by_title_key = {}
+    for row in rows:
+        for candidate in (clean_text(row["song_page_url"]), clean_text(row["source_url"])):
+            if candidate and candidate not in existing_by_page_url:
+                existing_by_page_url[candidate] = row
+        title_key = song_identity_key(row["title"])
+        if not title_key:
+            continue
+        existing_by_title_key.setdefault(title_key, []).append(row)
+    return rows, existing_by_page_url, existing_by_title_key
+
+
+def resolve_existing_album_song(existing_by_page_url, existing_by_title_key, song_payload):
+    for candidate in (clean_text(song_payload.get("sourceUrl")), clean_text(song_payload.get("songPageUrl"))):
+        if candidate and candidate in existing_by_page_url:
+            return existing_by_page_url[candidate]
+    title_key = song_identity_key(song_payload.get("title"))
+    if not title_key:
+        return None
+    matches = existing_by_title_key.get(title_key) or []
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def build_index_payload(raw_catalog=None):
     raw_catalog = raw_catalog or load_raw_catalog()
     songs = []
@@ -1078,14 +1117,43 @@ def upsert_album_into_db(album_payload):
 
     with get_db_connection() as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("DELETE FROM download_links WHERE song_id IN (SELECT id FROM songs WHERE album_url = ?)", (album_url,))
-        connection.execute("DELETE FROM songs WHERE album_url = ?", (album_url,))
+        existing_rows, existing_by_page_url, existing_by_title_key = build_existing_album_song_maps(connection, album_url)
+        existing_song_ids = {clean_text(row["id"]) for row in existing_rows if clean_text(row["id"])}
+        refreshed_song_ids = []
+        adjusted_songs_payload = []
+        for song in songs_payload:
+            payload = dict(song)
+            payload["songPageUrl"] = clean_text(payload.get("songPageUrl") or payload.get("sourceUrl"))
+            payload["sourceUrl"] = clean_text(payload.get("sourceUrl") or payload.get("songPageUrl") or album_url)
+            existing_match = resolve_existing_album_song(existing_by_page_url, existing_by_title_key, payload)
+            if existing_match is not None:
+                payload["id"] = clean_text(existing_match["id"]) or payload.get("id")
+            adjusted_songs_payload.append(payload)
+            if clean_text(payload.get("id")):
+                refreshed_song_ids.append(clean_text(payload.get("id")))
+
+        stale_song_ids = sorted(existing_song_ids - set(refreshed_song_ids))
+        connection.execute(
+            "DELETE FROM download_links WHERE song_id IN (SELECT id FROM songs WHERE album_url = ?)",
+            (album_url,),
+        )
         connection.execute(
             """
-            INSERT OR REPLACE INTO albums (
+            INSERT INTO albums (
               url, title, page_number, year, music_director, director, starring,
               lyricists, zip_links_json, track_count, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+              title = excluded.title,
+              page_number = excluded.page_number,
+              year = excluded.year,
+              music_director = excluded.music_director,
+              director = excluded.director,
+              starring = excluded.starring,
+              lyricists = excluded.lyricists,
+              zip_links_json = excluded.zip_links_json,
+              track_count = excluded.track_count,
+              updated_at = excluded.updated_at
             """,
             (
                 album_url,
@@ -1101,7 +1169,7 @@ def upsert_album_into_db(album_payload):
                 updated_at,
             ),
         )
-        if songs_payload:
+        if adjusted_songs_payload:
             connection.executemany(
                 """
                 INSERT INTO songs (
@@ -1110,6 +1178,30 @@ def upsert_album_into_db(album_payload):
                   remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
                   download_links_json, spotify_json, last_refreshed_at, link_status, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  album_url = excluded.album_url,
+                  title = excluded.title,
+                  artist = excluded.artist,
+                  singers = excluded.singers,
+                  composer = excluded.composer,
+                  movie = excluded.movie,
+                  year = excluded.year,
+                  mood = excluded.mood,
+                  song_page_url = excluded.song_page_url,
+                  source_url = excluded.source_url,
+                  image_url = excluded.image_url,
+                  audio_url = excluded.audio_url,
+                  audio_128_url = excluded.audio_128_url,
+                  audio_320_url = excluded.audio_320_url,
+                  remote_audio_128_url = excluded.remote_audio_128_url,
+                  remote_audio_320_url = excluded.remote_audio_320_url,
+                  local_audio_128_url = excluded.local_audio_128_url,
+                  local_audio_320_url = excluded.local_audio_320_url,
+                  download_links_json = excluded.download_links_json,
+                  spotify_json = excluded.spotify_json,
+                  last_refreshed_at = excluded.last_refreshed_at,
+                  link_status = excluded.link_status,
+                  updated_at = excluded.updated_at
                 """,
                 [
                     (
@@ -1138,12 +1230,12 @@ def upsert_album_into_db(album_payload):
                         "fresh" if song.get("audioUrl") else "missing",
                         updated_at,
                     )
-                    for song in songs_payload
+                    for song in adjusted_songs_payload
                 ],
             )
 
             link_rows = []
-            for song in songs_payload:
+            for song in adjusted_songs_payload:
                 for link in song.get("downloadLinks", []) or []:
                     if not clean_text(link.get("url")):
                         continue
@@ -1160,6 +1252,12 @@ def upsert_album_into_db(album_payload):
                     "INSERT INTO download_links (song_id, url, label, bitrate) VALUES (?, ?, ?, ?)",
                     link_rows,
                 )
+        if stale_song_ids:
+            placeholders = ", ".join("?" for _ in stale_song_ids)
+            connection.execute(
+                f"DELETE FROM songs WHERE album_url = ? AND id IN ({placeholders})",
+                (album_url, *stale_song_ids),
+            )
 
         meta_rows = dict(connection.execute("SELECT key, value FROM app_meta").fetchall())
         album_count = connection.execute("SELECT COUNT(*) FROM albums").fetchone()[0]

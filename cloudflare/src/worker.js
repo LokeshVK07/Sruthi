@@ -1704,10 +1704,21 @@ async function refreshAlbum(env, albumUrl, html) {
   statements.push(
     env.DB.prepare(
       `
-      INSERT OR REPLACE INTO albums (
+      INSERT INTO albums (
         url, title, page_number, year, music_director, director, starring, lyricists,
         zip_links_json, track_count, updated_at
       ) VALUES (?, ?, 0, ?, ?, '', '', '', '[]', ?, ?)
+      ON CONFLICT(url) DO UPDATE SET
+        title = excluded.title,
+        page_number = excluded.page_number,
+        year = excluded.year,
+        music_director = excluded.music_director,
+        director = excluded.director,
+        starring = excluded.starring,
+        lyricists = excluded.lyricists,
+        zip_links_json = excluded.zip_links_json,
+        track_count = excluded.track_count,
+        updated_at = excluded.updated_at
       `,
     ).bind(albumUrl, albumTitle, year, composer, albumTracks.length, updatedAt),
   );
@@ -1725,12 +1736,36 @@ async function refreshAlbum(env, albumUrl, html) {
     statements.push(
       env.DB.prepare(
         `
-        INSERT OR REPLACE INTO songs (
+        INSERT INTO songs (
           id, album_url, title, artist, singers, composer, movie, year, mood,
           song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
           remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
           download_links_json, spotify_json, last_refreshed_at, link_status, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, '{}', ?, 'fresh', ?)
+        ON CONFLICT(id) DO UPDATE SET
+          album_url = excluded.album_url,
+          title = excluded.title,
+          artist = excluded.artist,
+          singers = excluded.singers,
+          composer = excluded.composer,
+          movie = excluded.movie,
+          year = excluded.year,
+          mood = excluded.mood,
+          song_page_url = excluded.song_page_url,
+          source_url = excluded.source_url,
+          image_url = excluded.image_url,
+          audio_url = excluded.audio_url,
+          audio_128_url = excluded.audio_128_url,
+          audio_320_url = excluded.audio_320_url,
+          remote_audio_128_url = excluded.remote_audio_128_url,
+          remote_audio_320_url = excluded.remote_audio_320_url,
+          local_audio_128_url = excluded.local_audio_128_url,
+          local_audio_320_url = excluded.local_audio_320_url,
+          download_links_json = excluded.download_links_json,
+          spotify_json = excluded.spotify_json,
+          last_refreshed_at = excluded.last_refreshed_at,
+          link_status = excluded.link_status,
+          updated_at = excluded.updated_at
         `,
       ).bind(
         payload.id,
