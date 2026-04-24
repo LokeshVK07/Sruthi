@@ -11,6 +11,11 @@ import duckdb
 
 
 ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+  sys.path.insert(0, str(ROOT))
+
+from playlist_catalog import ensure_playlist_tables, seed_playlists
+
 DEFAULT_DB_PATH = ROOT / "data" / "sruthi.db"
 DEFAULT_SEED_PATH = ROOT / "cloudflare" / "data" / "seed.sql"
 DEFAULT_BASELINE_PATH = ROOT / "cloudflare" / "data" / "release-baseline.json"
@@ -70,6 +75,24 @@ def validate_sqlite_source(db_path: Path):
     "songs": song_rows,
     "updatedAt": updated_at_row[0] if updated_at_row else None,
   }
+
+
+def should_seed_playlists(db_path: Path):
+  lowered = str(db_path).lower()
+  return "/telugu/" not in lowered and "\\telugu\\" not in lowered
+
+
+def ensure_curated_playlists(db_path: Path):
+  if not should_seed_playlists(db_path):
+    return None
+
+  connection = sqlite3.connect(db_path)
+  connection.row_factory = sqlite3.Row
+  try:
+    ensure_playlist_tables(connection)
+    return seed_playlists(connection, log_warning=lambda message: print(message, file=sys.stderr))
+  finally:
+    connection.close()
 
 
 def compute_metrics(source, duckdb_path: Path):
@@ -188,6 +211,8 @@ def generate_seed(db_path: Path, seed_path: Path):
     "CREATE TABLE app_meta",
     "CREATE TABLE albums",
     "CREATE TABLE songs",
+    "CREATE TABLE playlists",
+    "CREATE TABLE playlist_items",
     "INSERT INTO app_meta",
     "INSERT INTO albums",
     "INSERT INTO songs",
@@ -224,12 +249,13 @@ def main():
   args.baseline = args.baseline.resolve()
   args.manifest = args.manifest.resolve()
   args.duckdb_path = args.duckdb_path.resolve()
+  playlist_summary = ensure_curated_playlists(args.db)
   source = validate_sqlite_source(args.db)
   metrics = compute_metrics(source, args.duckdb_path)
   validate_metrics(metrics, args.baseline)
   generate_seed(args.db, args.seed)
   write_manifest(args.manifest, metrics, source["updatedAt"])
-  print(json.dumps({"ok": True, "metrics": metrics}, indent=2))
+  print(json.dumps({"ok": True, "metrics": metrics, "playlists": playlist_summary or {}}, indent=2))
 
 
 if __name__ == "__main__":

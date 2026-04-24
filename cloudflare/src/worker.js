@@ -644,13 +644,11 @@ async function handleApi(request, env, url, ctx) {
   }
 
   if (url.pathname === "/api/playlists") {
-    await clearOfficialPlaylistTables(env);
     const playlists = await listOfficialPlaylists(env, { includeSongIds: false });
     return json({ playlists });
   }
 
   if (url.pathname === "/api/playlist") {
-    await clearOfficialPlaylistTables(env);
     const playlistId = cleanText(url.searchParams.get("id"));
     if (!playlistId) return json({ error: "Playlist id is required." }, 400);
     const playlist = await loadOfficialPlaylistDetail(env, playlistId);
@@ -691,8 +689,13 @@ async function handleApi(request, env, url, ctx) {
     if (configuredToken && suppliedToken !== configuredToken) {
       return json({ error: "Unauthorized." }, 401);
     }
-    await clearOfficialPlaylistTables(env);
-    return json({ ok: true, imported: 0 });
+    const payload = await request.json().catch(() => ({}));
+    const playlists = normalizeSyncPlaylists(payload);
+    await ensureOfficialPlaylistTables(env);
+    for (const playlist of playlists) {
+      await upsertOfficialPlaylist(env, playlist);
+    }
+    return json({ ok: true, imported: playlists.length });
   }
 
   if (url.pathname === "/api/warmup") {
@@ -908,7 +911,6 @@ async function runScheduledSync(env) {
   try {
     const payload = await fetchSyncFeed(feedUrl);
     const albums = normalizeSyncPayload(payload);
-    const playlists = normalizeSyncPlaylists(payload);
     let songsSeen = 0;
     for (const album of albums) {
       songsSeen += album.songs.length;
@@ -920,8 +922,6 @@ async function runScheduledSync(env) {
         await upsertSong(env, song);
       }
     }
-
-    await clearOfficialPlaylistTables(env);
 
     const finishedAt = nowIso();
     await env.DB.batch([
@@ -978,34 +978,36 @@ async function ensureOfficialPlaylistTables(env) {
   await env.DB.batch([
     env.DB.prepare(
       `
-      CREATE TABLE IF NOT EXISTS official_playlists (
-        id TEXT PRIMARY KEY,
+      CREATE TABLE IF NOT EXISTS playlists (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
-        source_url TEXT,
-        updated_at TEXT NOT NULL,
-        song_count INTEGER NOT NULL DEFAULT 0
+        slug TEXT NOT NULL UNIQUE,
+        description TEXT,
+        category TEXT NOT NULL,
+        cover_url TEXT,
+        tags TEXT,
+        is_featured INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
       )
       `,
     ),
     env.DB.prepare(
       `
-      CREATE TABLE IF NOT EXISTS official_playlist_songs (
-        playlist_id TEXT NOT NULL,
+      CREATE TABLE IF NOT EXISTS playlist_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        playlist_id INTEGER NOT NULL,
         song_id TEXT NOT NULL,
-        position INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (playlist_id, song_id)
+        position INTEGER NOT NULL,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(playlist_id, song_id),
+        FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+        FOREIGN KEY (song_id) REFERENCES songs(id) ON DELETE CASCADE
       )
       `,
     ),
-    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_official_playlist_songs_playlist ON official_playlist_songs(playlist_id, position)"),
-  ]);
-}
-
-async function clearOfficialPlaylistTables(env) {
-  await ensureOfficialPlaylistTables(env);
-  await env.DB.batch([
-    env.DB.prepare("DELETE FROM official_playlist_songs"),
-    env.DB.prepare("DELETE FROM official_playlists"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist_id ON playlist_items(playlist_id)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_playlist_items_song_id ON playlist_items(song_id)"),
   ]);
 }
 
@@ -1136,6 +1138,11 @@ function normalizePlaylist(playlist) {
   return {
     id: cleanText(playlist?.id) || slugValue(playlist?.name),
     name: cleanText(playlist?.name || playlist?.title),
+    description: cleanText(playlist?.description),
+    category: cleanText(playlist?.category) || "Imported",
+    coverUrl: absoluteUrl(playlist?.coverUrl || playlist?.cover_url || playlist?.imageUrl),
+    tags: cleanText(playlist?.tags),
+    isFeatured: Boolean(playlist?.isFeatured || playlist?.is_featured),
     sourceUrl: absoluteUrl(playlist?.sourceUrl || playlist?.url),
     updatedAt: cleanText(playlist?.updatedAt) || nowIso(),
     songRefs,
@@ -1242,104 +1249,183 @@ async function upsertSong(env, song) {
 
 async function upsertOfficialPlaylist(env, playlist) {
   const resolvedSongIds = await resolvePlaylistSongIds(env, playlist.songRefs || []);
-  await env.DB.prepare(
+  const slug = cleanText(playlist.id || slugValue(playlist.name));
+  const now = cleanText(playlist.updatedAt) || nowIso();
+  const existing = await env.DB.prepare(
     `
-    INSERT INTO official_playlists (id, name, source_url, updated_at, song_count)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET
-      name = excluded.name,
-      source_url = excluded.source_url,
-      updated_at = excluded.updated_at,
-      song_count = excluded.song_count
+    SELECT id
+    FROM playlists
+    WHERE slug = ?
+    LIMIT 1
     `,
-  ).bind(
-    playlist.id,
-    playlist.name,
-    playlist.sourceUrl,
-    playlist.updatedAt,
-    resolvedSongIds.length,
-  ).run();
+  ).bind(slug).first();
 
-  await env.DB.prepare("DELETE FROM official_playlist_songs WHERE playlist_id = ?").bind(playlist.id).run();
+  let playlistDbId = Number(existing?.id || 0);
+  if (playlistDbId) {
+    await env.DB.prepare(
+      `
+      UPDATE playlists
+      SET name = ?, description = ?, category = ?, cover_url = ?, tags = ?, is_featured = ?, updated_at = ?
+      WHERE id = ?
+      `,
+    ).bind(
+      playlist.name,
+      cleanText(playlist.description),
+      cleanText(playlist.category) || "Imported",
+      cleanText(playlist.coverUrl),
+      cleanText(playlist.tags),
+      Number(playlist.isFeatured ? 1 : 0),
+      now,
+      playlistDbId,
+    ).run();
+  } else {
+    const insert = await env.DB.prepare(
+      `
+      INSERT INTO playlists (
+        name, slug, description, category, cover_url, tags, is_featured, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+    ).bind(
+      playlist.name,
+      slug,
+      cleanText(playlist.description),
+      cleanText(playlist.category) || "Imported",
+      cleanText(playlist.coverUrl),
+      cleanText(playlist.tags),
+      Number(playlist.isFeatured ? 1 : 0),
+      now,
+      now,
+    ).run();
+    playlistDbId = Number(insert.meta?.last_row_id || 0);
+  }
+
+  if (!playlistDbId) return;
+
+  if (!resolvedSongIds.length) return;
+  const existingRows = await env.DB.prepare(
+    `
+    SELECT song_id
+    FROM playlist_items
+    WHERE playlist_id = ?
+    `,
+  ).bind(playlistDbId).all();
+  const existingSongIds = new Set((existingRows.results || []).map((row) => cleanText(row.song_id)).filter(Boolean));
+  const previousCount = existingSongIds.size;
+  let remainingNewSlots = Math.max(0, 100 - previousCount);
   const statements = resolvedSongIds.map((songId, index) =>
     env.DB.prepare(
       `
-      INSERT OR REPLACE INTO official_playlist_songs (playlist_id, song_id, position)
-      VALUES (?, ?, ?)
+      INSERT INTO playlist_items (playlist_id, song_id, position, created_at)
+      VALUES (?, ?, ?, ?)
+      ON CONFLICT(playlist_id, song_id) DO UPDATE SET
+        position = excluded.position
       `,
-    ).bind(playlist.id, songId, index),
-  );
-  if (statements.length) {
-    await env.DB.batch(statements);
-  }
+    ).bind(playlistDbId, songId, index + 1, now)
+  ).filter((statement, index) => {
+    const songId = resolvedSongIds[index];
+    if (existingSongIds.has(songId)) return true;
+    if (remainingNewSlots <= 0) return false;
+    remainingNewSlots -= 1;
+    return true;
+  });
+  if (!statements.length) return;
+  await env.DB.batch(statements);
 }
 
 async function listOfficialPlaylists(env, { includeSongIds = true } = {}) {
+  await ensureOfficialPlaylistTables(env);
   const rows = await env.DB.prepare(
     `
-    SELECT id, name, source_url, updated_at, song_count
-    FROM official_playlists
-    ORDER BY lower(name) ASC
+    SELECT
+      p.id,
+      p.name,
+      p.slug,
+      p.description,
+      p.category,
+      p.cover_url,
+      p.tags,
+      p.is_featured,
+      p.created_at,
+      p.updated_at,
+      COUNT(pi.song_id) AS song_count
+    FROM playlists p
+    LEFT JOIN playlist_items pi ON pi.playlist_id = p.id
+    GROUP BY
+      p.id, p.name, p.slug, p.description, p.category, p.cover_url,
+      p.tags, p.is_featured, p.created_at, p.updated_at
+    ORDER BY lower(p.category) ASC, lower(p.name) ASC
     `,
   ).all();
   const results = rows.results || [];
   const playlists = [];
   for (const row of results) {
-    let songIds = [];
-    let songCount = Number(row.song_count || 0);
-    if (includeSongIds) {
-      songIds = await officialPlaylistSongIds(env, row.id, cleanText(row.name));
-      songCount = songIds.length;
-    } else if (!songCount) {
-      songCount = (await derivePlaylistSongIdsFromName(env, cleanText(row.name))).length;
-    }
+    const songIds = includeSongIds ? await officialPlaylistSongIds(env, row.slug) : [];
     playlists.push({
-      id: row.id,
+      id: cleanText(row.slug),
       name: cleanText(row.name),
-      sourceUrl: cleanText(row.source_url),
-      updatedAt: row.updated_at || null,
+      description: cleanText(row.description),
+      category: cleanText(row.category),
+      coverUrl: cleanText(row.cover_url),
+      tags: cleanText(row.tags),
+      isFeatured: Number(row.is_featured || 0),
+      createdAt: cleanText(row.created_at),
+      updatedAt: cleanText(row.updated_at),
       songIds,
-      songCount,
+      songCount: includeSongIds ? songIds.length : Number(row.song_count || 0),
       official: true,
     });
   }
   return playlists;
 }
 
-async function officialPlaylistSongIds(env, playlistId, playlistName = "") {
+async function officialPlaylistSongIds(env, playlistSlug) {
   const songs = await env.DB.prepare(
     `
-    SELECT song_id
-    FROM official_playlist_songs
-    WHERE playlist_id = ?
-    ORDER BY position ASC, song_id ASC
+    SELECT pi.song_id
+    FROM playlist_items pi
+    JOIN playlists p ON p.id = pi.playlist_id
+    WHERE p.slug = ?
+    ORDER BY pi.position ASC, pi.song_id ASC
     `,
-  ).bind(playlistId).all();
-  let songIds = (songs.results || []).map((item) => cleanText(item.song_id)).filter(Boolean);
-  if (!songIds.length) {
-    songIds = await derivePlaylistSongIdsFromName(env, cleanText(playlistName));
-  }
-  return songIds;
+  ).bind(playlistSlug).all();
+  return (songs.results || []).map((item) => cleanText(item.song_id)).filter(Boolean);
 }
 
 async function loadOfficialPlaylistDetail(env, playlistId) {
-  let row = await env.DB.prepare(
+  await ensureOfficialPlaylistTables(env);
+  const row = await env.DB.prepare(
     `
-    SELECT id, name, source_url, updated_at, song_count
-    FROM official_playlists
-    WHERE id = ?
+    SELECT
+      id,
+      name,
+      slug,
+      description,
+      category,
+      cover_url,
+      tags,
+      is_featured,
+      created_at,
+      updated_at
+    FROM playlists
+    WHERE slug = ?
     LIMIT 1
     `,
   ).bind(playlistId).first();
   if (!row) return null;
 
-  const songIds = await officialPlaylistSongIds(env, playlistId, cleanText(row.name));
+  const songIds = await officialPlaylistSongIds(env, cleanText(row.slug));
   const songs = await loadSongsByIds(env, songIds);
   return {
-    id: row.id,
+    id: cleanText(row.slug),
     name: cleanText(row.name),
-    sourceUrl: cleanText(row.source_url),
-    updatedAt: row.updated_at || null,
+    description: cleanText(row.description),
+    category: cleanText(row.category),
+    coverUrl: cleanText(row.cover_url),
+    tags: cleanText(row.tags),
+    isFeatured: Number(row.is_featured || 0),
+    createdAt: cleanText(row.created_at),
+    updatedAt: cleanText(row.updated_at),
     songCount: songIds.length,
     songIds: songs.map((song) => song.id),
     songs,

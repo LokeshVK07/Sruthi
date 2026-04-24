@@ -30,6 +30,7 @@ const state = {
   },
   volumeLevel: 0.85,
   hiddenOfficialPlaylistSongs: {},
+  playlistCategory: "all",
 };
 
 const nodes = {
@@ -43,6 +44,10 @@ const nodes = {
   songList: document.querySelector("#song-list"),
   resultCount: document.querySelector("#result-count"),
   collectionTitle: document.querySelector("#collection-title"),
+  collectionDescription: document.querySelector("#collection-description"),
+  collectionActions: document.querySelector("#collection-actions"),
+  collectionPlayAll: document.querySelector("#collection-play-all"),
+  collectionShuffle: document.querySelector("#collection-shuffle"),
   collectionSortWrap: document.querySelector("#collection-sort-wrap"),
   albumCount: document.querySelector("#album-count"),
   trackCount: document.querySelector("#track-count"),
@@ -53,6 +58,8 @@ const nodes = {
   playlistList: document.querySelector("#playlist-list"),
   playlistForm: document.querySelector("#playlist-form"),
   playlistInput: document.querySelector("#playlist-input"),
+  playlistCategoryFilter: document.querySelector("#playlist-category-filter"),
+  playlistGrid: document.querySelector("#playlist-grid"),
   refreshButton: document.querySelector("#refresh-library"),
   showAllRail: document.querySelector("#show-all-rail"),
   loadMore: document.querySelector("#load-more"),
@@ -595,13 +602,11 @@ function currentPlaylist() {
 }
 
 function hiddenSongIdsForPlaylist(playlistId) {
-  return new Set(state.hiddenOfficialPlaylistSongs[playlistId] || []);
+  return new Set();
 }
 
 function applyOfficialPlaylistVisibility(playlist, songIds) {
-  if (!playlist?.official) return [...songIds];
-  const hidden = hiddenSongIdsForPlaylist(playlist.id);
-  return songIds.filter((songId) => !hidden.has(songId));
+  return [...songIds];
 }
 
 function currentCollectionTitle() {
@@ -612,6 +617,33 @@ function currentCollectionTitle() {
   }
   if (state.albumFilter) return state.albumFilter;
   return "Song Collection";
+}
+
+function currentCollectionDescription() {
+  if (state.currentView === "playlist") {
+    const playlist = currentPlaylist();
+    if (!playlist) return "";
+    const parts = [];
+    if (playlist.category) parts.push(playlistCategoryLabel(playlist.category));
+    if (playlist.description) parts.push(sanitizeText(playlist.description));
+    return parts.join(" • ");
+  }
+  return "";
+}
+
+function playlistCategoryLabel(value) {
+  const labels = {
+    era: "Era",
+    actor: "Actor",
+    music_director: "Music Director",
+    mood: "Mood",
+  };
+  return labels[value] || "Playlist";
+}
+
+function filteredOfficialPlaylists() {
+  if (state.playlistCategory === "all") return [...state.officialPlaylists];
+  return state.officialPlaylists.filter((playlist) => playlist.category === state.playlistCategory);
 }
 
 async function openAlbumView(movieName) {
@@ -712,7 +744,11 @@ function saveQueue() {
 }
 
 function saveHiddenOfficialPlaylistSongs() {
-  window.localStorage.setItem(OFFICIAL_PLAYLIST_HIDDEN_KEY, JSON.stringify(state.hiddenOfficialPlaylistSongs));
+  try {
+    window.localStorage.removeItem(OFFICIAL_PLAYLIST_HIDDEN_KEY);
+  } catch (_) {
+    // ignore storage failures
+  }
 }
 
 function loadQueue() {
@@ -725,12 +761,8 @@ function loadQueue() {
 }
 
 function loadHiddenOfficialPlaylistSongs() {
-  try {
-    const stored = JSON.parse(window.localStorage.getItem(OFFICIAL_PLAYLIST_HIDDEN_KEY) || "{}");
-    state.hiddenOfficialPlaylistSongs = stored && typeof stored === "object" ? stored : {};
-  } catch (_) {
-    state.hiddenOfficialPlaylistSongs = {};
-  }
+  state.hiddenOfficialPlaylistSongs = {};
+  saveHiddenOfficialPlaylistSongs();
 }
 
 async function loadOfficialPlaylists() {
@@ -744,6 +776,12 @@ async function loadOfficialPlaylists() {
         ? payload.playlists.map((playlist) => ({
             id: sanitizeText(playlist.id),
             name: sanitizeText(playlist.name),
+            description: sanitizeText(playlist.description),
+            category: sanitizeText(playlist.category),
+            coverUrl: sanitizeText(playlist.coverUrl),
+            tags: sanitizeText(playlist.tags),
+            isFeatured: Number(playlist.isFeatured || 0),
+            updatedAt: sanitizeText(playlist.updatedAt),
             songIds: applyOfficialPlaylistVisibility(
               { id: sanitizeText(playlist.id), official: true },
               Array.isArray(playlist.songIds) ? playlist.songIds.filter(Boolean) : [],
@@ -757,12 +795,14 @@ async function loadOfficialPlaylists() {
             official: true,
           }))
         : [];
+      renderCuratedPlaylistShelf();
       return;
     } catch (_) {
       // try next source
     }
   }
   state.officialPlaylists = [];
+  renderCuratedPlaylistShelf();
 }
 
 function syncFavoriteSnapshot(song) {
@@ -1280,25 +1320,18 @@ async function loadCollectionView() {
         const songIds = applyOfficialPlaylistVisibility(playlist, songs.map((song) => song.id).filter(Boolean));
         cacheSongs(songs);
         songs.forEach(syncFavoriteSnapshot);
+        const playlistSongCount = Math.max(
+          0,
+          Number(payload?.songCount || songIds.length || songs.length),
+        );
         playlist.songIds = songIds;
-        playlist.songCount = songIds.length;
+        playlist.songCount = playlistSongCount;
         const rawSongs = songIds.map((songId) => state.songCache.get(songId)).filter(Boolean);
-        const displayName = officialPlaylistDisplayName(playlist.name);
-        let filtered = rawSongs;
-
-        // Strict composer filtering for "Hits" playlists
-        if (displayName.endsWith(" Hits")) {
-          const targetComposer = displayName.replace(" Hits", "").toLowerCase().trim();
-          filtered = rawSongs.filter(song => {
-            const songComposer = (song.composer || "").toLowerCase();
-            const songArtist = (song.artist || "").toLowerCase();
-            return songComposer.includes(targetComposer) || songArtist.includes(targetComposer);
-          });
-        }
-
-        filtered = filterClientSongs(filtered);
+        const filtered = filterClientSongs(rawSongs);
         state.songs = filtered;
-        state.totalSongs = filtered.length;
+        state.totalSongs = (state.query || state.decade !== "all" || state.localSongs)
+          ? filtered.length
+          : playlistSongCount;
         state.hasMore = false;
         state.offset = filtered.length;
         if (!state.selectedSongId && filtered.length) state.selectedSongId = filtered[0].id;
@@ -1356,6 +1389,74 @@ function renderPlaylists() {
   nodes.playlistList.append(fragment);
 }
 
+function renderCuratedPlaylistShelf() {
+  if (!nodes.playlistGrid || !nodes.playlistCategoryFilter) return;
+  const categories = [...new Set(state.officialPlaylists.map((playlist) => sanitizeText(playlist.category)).filter(Boolean))];
+  const currentValue = categories.includes(state.playlistCategory) || state.playlistCategory === "all"
+    ? state.playlistCategory
+    : "all";
+  state.playlistCategory = currentValue;
+
+  nodes.playlistCategoryFilter.innerHTML = "";
+  nodes.playlistCategoryFilter.append(new Option("All playlists", "all"));
+  categories.forEach((category) => {
+    nodes.playlistCategoryFilter.append(new Option(playlistCategoryLabel(category), category));
+  });
+  nodes.playlistCategoryFilter.value = state.playlistCategory;
+
+  nodes.playlistGrid.innerHTML = "";
+  const playlists = filteredOfficialPlaylists();
+  if (!playlists.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "Curated Tamil playlists will appear here.";
+    nodes.playlistGrid.append(empty);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  playlists.forEach((playlist) => {
+    const card = document.createElement("article");
+    card.className = "playlist-card";
+    if (state.currentView === "playlist" && state.currentPlaylistId === playlist.id) {
+      card.classList.add("is-active");
+    }
+    card.dataset.playlistId = playlist.id;
+    card.innerHTML = `
+      <button class="playlist-card-main" type="button" data-action="open">
+        <span class="playlist-card-eyebrow">${playlistCategoryLabel(playlist.category)}</span>
+        <strong class="playlist-card-title">${officialPlaylistDisplayName(playlist.name)}</strong>
+        <span class="playlist-card-copy">${playlist.description || "Curated from the Tamil catalog."}</span>
+      </button>
+      <div class="playlist-card-meta">
+        <span>${playlist.songCount || 0} songs</span>
+        <div class="playlist-card-actions">
+          <button type="button" class="playlist-chip-button" data-action="play">Play All</button>
+          <button type="button" class="playlist-chip-button" data-action="shuffle">Shuffle</button>
+        </div>
+      </div>
+    `;
+    fragment.append(card);
+  });
+  nodes.playlistGrid.append(fragment);
+}
+
+async function playCurrentCollection({ shuffle = false } = {}) {
+  const ids = getContext().filter(Boolean);
+  if (!ids.length) return;
+  if (shuffle) {
+    setPlaybackMode("shuffle");
+    rebuildShuffleOrder();
+    const targetId = state.shuffleOrder[0] || ids[0];
+    await selectSong(targetId, { autoplay: true });
+    return;
+  }
+  if (state.playbackMode === "shuffle") {
+    setPlaybackMode("normal");
+  }
+  await selectSong(ids[0], { autoplay: true });
+}
+
 function renderSongRowActions(row, song) {
   const picker = row.querySelector(".playlist-pick");
   picker.innerHTML = "";
@@ -1364,7 +1465,7 @@ function renderSongRowActions(row, song) {
   picker.disabled = !state.playlists.length;
 
   const removeButton = row.querySelector(".song-remove");
-  removeButton.classList.toggle("hidden", state.currentView !== "playlist");
+  removeButton.classList.toggle("hidden", state.currentView !== "playlist" || Boolean(currentPlaylist()?.official));
   const menuButton = row.querySelector(".song-menu-toggle");
   if (menuButton) {
     menuButton.textContent = "⋯";
@@ -1377,9 +1478,19 @@ function renderSongs() {
   nodes.songList.innerHTML = "";
   nodes.resultCount.textContent = `${state.totalSongs} songs`;
   nodes.collectionTitle.textContent = currentCollectionTitle();
+  if (nodes.collectionDescription) {
+    const description = currentCollectionDescription();
+    nodes.collectionDescription.textContent = description;
+    nodes.collectionDescription.classList.toggle("hidden", !description);
+  }
+  if (nodes.collectionActions) {
+    const showActions = state.currentView === "playlist" && state.songs.length > 0;
+    nodes.collectionActions.classList.toggle("hidden", !showActions);
+  }
   nodes.collectionSortWrap.classList.toggle("hidden", state.currentView !== "favorites");
   nodes.showAllRail.classList.remove("hidden");
   nodes.favoriteSort.value = state.favoriteSort;
+  renderCuratedPlaylistShelf();
 
   if (!state.songs.length) {
     const empty = document.createElement("div");
@@ -1943,17 +2054,7 @@ function removeSongFromCurrentPlaylist(songId) {
   const playlist = currentPlaylist();
   if (!playlist) return;
   if (playlist.official) {
-    const hidden = new Set(state.hiddenOfficialPlaylistSongs[playlist.id] || []);
-    hidden.add(songId);
-    state.hiddenOfficialPlaylistSongs[playlist.id] = [...hidden];
-    saveHiddenOfficialPlaylistSongs();
-    playlist.songIds = (playlist.songIds || []).filter((id) => id !== songId);
-    playlist.songCount = Math.max(0, Number(playlist.songCount || 0) - 1);
-    if (state.queue.includes(songId)) {
-      removeSongFromQueue(songId);
-    }
-    renderPlaylists();
-    loadCollectionView();
+    showToast("Official playlists are read-only");
     return;
   }
   updatePlaylistInState(playlist.id, (item) => ({
@@ -2065,6 +2166,7 @@ async function switchView(view, playlistId = null) {
   if (nodes.searchInput) nodes.searchInput.value = "";
   renderFavorites();
   renderPlaylists();
+  renderCuratedPlaylistShelf();
   if (view === "playlist") {
     state.songs = [];
     state.totalSongs = currentPlaylist()?.songCount || 0;
@@ -2089,6 +2191,7 @@ async function refreshCurrentView() {
   await loadOfficialPlaylists();
   renderPlaylists();
   renderFavorites();
+  renderCuratedPlaylistShelf();
   renderSongs();
   if (state.currentView === "all") {
     await loadLibrary({ reset: true });
@@ -2136,13 +2239,18 @@ async function loadLibrary({ reset = false } = {}) {
     if (reset) {
       state.songs = songs;
       state.offset = songs.length;
+      state.totalSongs = Math.max(0, Number(payload.total || songs.length));
     } else {
       state.songs = [...state.songs, ...songs];
       state.offset += songs.length;
+      state.totalSongs = Math.max(
+        state.totalSongs,
+        Number(payload.total || 0),
+        state.songs.length,
+      );
     }
     cacheSongs(songs);
     state.songs.forEach(syncFavoriteSnapshot);
-    state.totalSongs = payload.total || state.songs.length;
     state.hasMore = Boolean(payload.hasMore);
     if (!state.selectedSongId && state.songs.length) state.selectedSongId = state.songs[0].id;
     renderSongs();
@@ -2227,6 +2335,33 @@ function bindEvents() {
   nodes.playlistForm.addEventListener("submit", (event) => {
     event.preventDefault();
     createPlaylist(nodes.playlistInput.value);
+  });
+
+  nodes.playlistCategoryFilter?.addEventListener("change", (event) => {
+    state.playlistCategory = event.target.value;
+    renderCuratedPlaylistShelf();
+  });
+
+  nodes.collectionPlayAll?.addEventListener("click", () => {
+    void playCurrentCollection({ shuffle: false });
+  });
+
+  nodes.collectionShuffle?.addEventListener("click", () => {
+    void playCurrentCollection({ shuffle: true });
+  });
+
+  nodes.playlistGrid?.addEventListener("click", async (event) => {
+    const card = event.target.closest(".playlist-card");
+    if (!card) return;
+    const playlistId = card.dataset.playlistId;
+    const action = event.target.closest("[data-action]")?.dataset.action || "open";
+    setMobileMenuOpen(false);
+    await switchView("playlist", playlistId);
+    if (action === "play") {
+      await playCurrentCollection({ shuffle: false });
+    } else if (action === "shuffle") {
+      await playCurrentCollection({ shuffle: true });
+    }
   });
 
   nodes.songList.addEventListener("click", async (event) => {

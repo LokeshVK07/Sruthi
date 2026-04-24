@@ -11,6 +11,8 @@ OUT_PATH = ROOT / "cloudflare" / "data" / "seed.sql"
 
 
 SCHEMA = """
+DROP TABLE IF EXISTS playlist_items;
+DROP TABLE IF EXISTS playlists;
 DROP TABLE IF EXISTS app_meta;
 DROP TABLE IF EXISTS albums;
 DROP TABLE IF EXISTS songs;
@@ -61,11 +63,37 @@ CREATE TABLE songs (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE playlists (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL UNIQUE,
+  description TEXT,
+  category TEXT NOT NULL,
+  cover_url TEXT,
+  tags TEXT,
+  is_featured INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE playlist_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  playlist_id INTEGER NOT NULL,
+  song_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(playlist_id, song_id),
+  FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+  FOREIGN KEY (song_id) REFERENCES songs(id) ON DELETE CASCADE
+);
+
 CREATE INDEX idx_albums_page_number ON albums(page_number, title);
 CREATE INDEX idx_songs_album_url ON songs(album_url);
 CREATE INDEX idx_songs_movie_title ON songs(movie, title);
 CREATE INDEX idx_songs_year ON songs(year);
 CREATE INDEX idx_songs_link_status ON songs(link_status);
+CREATE INDEX idx_playlist_items_playlist_id ON playlist_items(playlist_id);
+CREATE INDEX idx_playlist_items_song_id ON playlist_items(song_id);
 """
 
 
@@ -177,6 +205,43 @@ def main():
       """,
     ):
       write_insert(handle, "songs", song_columns, row)
+
+    playlist_columns = [
+      "id",
+      "name",
+      "slug",
+      "description",
+      "category",
+      "cover_url",
+      "tags",
+      "is_featured",
+      "created_at",
+      "updated_at",
+    ]
+    for row in connection.execute(
+      """
+      SELECT id, name, slug, description, category, cover_url, tags, is_featured, created_at, updated_at
+      FROM playlists
+      ORDER BY lower(category), lower(name), id
+      """,
+    ):
+      write_insert(handle, "playlists", playlist_columns, row)
+
+    playlist_item_columns = [
+      "id",
+      "playlist_id",
+      "song_id",
+      "position",
+      "created_at",
+    ]
+    for row in connection.execute(
+      """
+      SELECT id, playlist_id, song_id, position, created_at
+      FROM playlist_items
+      ORDER BY playlist_id, position, song_id
+      """,
+    ):
+      write_insert(handle, "playlist_items", playlist_item_columns, row)
 
   connection.close()
 

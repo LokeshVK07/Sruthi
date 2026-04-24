@@ -60,6 +60,7 @@ body::before {
 
 .side-rail,
 .toolbar-card,
+.playlist-discovery-card,
 .catalog-card,
 .player-bar {
   border: 1px solid var(--line);
@@ -280,6 +281,108 @@ dt {
 .playlist-list {
   display: grid;
   gap: 8px;
+}
+
+.playlist-discovery-card {
+  margin-top: 10px;
+  padding: 14px 16px;
+}
+
+.playlist-filter-wrap {
+  min-width: 148px;
+}
+
+.playlist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.playlist-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.03)),
+    radial-gradient(circle at top right, rgba(102, 169, 255, 0.18), transparent 52%);
+}
+
+.playlist-card.is-active {
+  border-color: rgba(102, 169, 255, 0.3);
+  box-shadow: 0 14px 32px rgba(11, 17, 32, 0.24);
+}
+
+.playlist-card-main {
+  display: grid;
+  gap: 8px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.playlist-card-eyebrow {
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.playlist-card-title {
+  font-family: var(--font-display);
+  font-size: 1.05rem;
+  line-height: 1.1;
+}
+
+.playlist-card-copy {
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--muted);
+}
+
+.playlist-card-meta,
+.playlist-card-actions,
+.collection-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.playlist-card-meta {
+  justify-content: space-between;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.playlist-chip-button {
+  border: 1px solid rgba(102, 169, 255, 0.22);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: rgba(102, 169, 255, 0.08);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.playlist-chip-button:hover,
+.playlist-chip-button:focus-visible {
+  border-color: rgba(102, 169, 255, 0.34);
+  background: rgba(102, 169, 255, 0.14);
+}
+
+.collection-description {
+  margin: 6px 0 0;
+  max-width: 58ch;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--muted);
 }
 .favorite-row,
 .playlist-row {
