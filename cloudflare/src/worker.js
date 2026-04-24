@@ -19,7 +19,7 @@ function teluguApiOrigin(env) {
 }
 
 function teluguAggregationEnabled(env) {
-  return Boolean(teluguApiOrigin(env));
+  return Boolean(env?.TELUGU_DB || (env?.TELUGU_SERVICE && typeof env.TELUGU_SERVICE.fetch === "function") || teluguApiOrigin(env));
 }
 
 function isTeluguSongId(songId) {
@@ -65,6 +65,32 @@ function decorateTeluguSong(song) {
 }
 
 async function fetchTeluguAppState(env) {
+  if (env.TELUGU_DB) {
+    const [albumCountRow, trackCountRow, updatedRow, decadeRows] = await Promise.all([
+      env.TELUGU_DB.prepare("SELECT COUNT(*) AS count FROM albums").first(),
+      env.TELUGU_DB.prepare("SELECT COUNT(*) AS count FROM songs").first(),
+      env.TELUGU_DB.prepare("SELECT MAX(updated_at) AS updatedAt FROM songs").first(),
+      env.TELUGU_DB.prepare(
+        `
+        SELECT DISTINCT ((year / 10) * 10) AS decade
+        FROM songs
+        WHERE year > 0
+        ORDER BY decade ASC
+        `,
+      ).all(),
+    ]);
+    return {
+      summary: {
+        albumCount: Number(albumCountRow?.count || 0),
+        trackCount: Number(trackCountRow?.count || 0),
+      },
+      filters: {
+        decades: (decadeRows.results || []).map((row) => `${row.decade}s`).filter(Boolean),
+        moods: ["Imported"],
+      },
+      updatedAt: updatedRow?.updatedAt || null,
+    };
+  }
   try {
     const response = await fetchTeluguResponse(env, "/api/app-state");
     if (!response.ok) return null;
@@ -74,7 +100,7 @@ async function fetchTeluguAppState(env) {
   }
 }
 
-async function fetchTeluguLibrary(env, { query, movie, decade, offset, limit }) {
+async function fetchTeluguLibrary(env, { query, movie, decade, offset = 0, limit = TELUGU_LIBRARY_LIMIT }) {
   if (!env.TELUGU_DB) {
     return { songs: [], total: 0 };
   }
