@@ -37,6 +37,11 @@ jobs:
       SRUTHI_D1_DB_A_NAME: ${{ vars.SRUTHI_D1_DB_A_NAME }}
       SRUTHI_D1_DB_B_ID: ${{ vars.SRUTHI_D1_DB_B_ID }}
       SRUTHI_D1_DB_B_NAME: ${{ vars.SRUTHI_D1_DB_B_NAME }}
+      SRUTHI_TELUGU_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_TELUGU_ACTIVE_D1_SLOT }}
+      SRUTHI_TELUGU_D1_DB_A_ID: ${{ vars.SRUTHI_TELUGU_D1_DB_A_ID }}
+      SRUTHI_TELUGU_D1_DB_A_NAME: ${{ vars.SRUTHI_TELUGU_D1_DB_A_NAME }}
+      SRUTHI_TELUGU_D1_DB_B_ID: ${{ vars.SRUTHI_TELUGU_D1_DB_B_ID }}
+      SRUTHI_TELUGU_D1_DB_B_NAME: ${{ vars.SRUTHI_TELUGU_D1_DB_B_NAME }}
       WRANGLER_SEND_METRICS: "false"
       GENERATED_WRANGLER_CONFIG: cloudflare/.generated/wrangler.deploy.jsonc
       RELEASE_MANIFEST: cloudflare/.generated/release-manifest.json
@@ -157,6 +162,25 @@ jobs:
           echo "TARGET_DB_NAME=$db_name" >> "$GITHUB_ENV"
           echo "TARGET_SLOT=$target" >> "$GITHUB_ENV"
 
+      - name: Resolve active Telugu D1 slot for worker binding
+        run: |
+          set -euo pipefail
+          telugu_active="${SRUTHI_TELUGU_ACTIVE_D1_SLOT:-A}"
+          if [[ "$telugu_active" == "B" ]]; then
+            telugu_db_id="${SRUTHI_TELUGU_D1_DB_B_ID:-}"
+            telugu_db_name="${SRUTHI_TELUGU_D1_DB_B_NAME:-}"
+          else
+            telugu_db_id="${SRUTHI_TELUGU_D1_DB_A_ID:-}"
+            telugu_db_name="${SRUTHI_TELUGU_D1_DB_A_NAME:-}"
+          fi
+          echo "TELUGU_DB_ID=${telugu_db_id}" >> "$GITHUB_ENV"
+          echo "TELUGU_DB_NAME=${telugu_db_name}" >> "$GITHUB_ENV"
+          if [[ -n "${telugu_db_id}" ]]; then
+            echo "Telugu DB binding: ${telugu_db_name} (slot ${telugu_active})"
+          else
+            echo "Telugu DB vars not configured — TELUGU_DB binding will be omitted from deploy config."
+          fi
+
       - name: Verify GitHub variable update token access
         env:
           GH_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
@@ -198,12 +222,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "${GENERATED_WRANGLER_CONFIG}")"
+
+          telugu_args=()
+          if [[ -n "${TELUGU_DB_ID:-}" ]]; then
+            telugu_args+=(--telugu-database-id "${TELUGU_DB_ID}")
+          fi
+          if [[ -n "${TELUGU_DB_NAME:-}" ]]; then
+            telugu_args+=(--telugu-database-name "${TELUGU_DB_NAME}")
+          fi
+
           python cloudflare/scripts/render_wrangler_config.py \
             --input cloudflare/wrangler.jsonc \
             --output "${GENERATED_WRANGLER_CONFIG}" \
             --database-id "${TARGET_DB_ID}" \
             --database-name "${TARGET_DB_NAME}" \
-            --account-id "${CLOUDFLARE_ACCOUNT_ID}"
+            --account-id "${CLOUDFLARE_ACCOUNT_ID}" \
+            "${telugu_args[@]}"
 
           if [[ ! -f "${GENERATED_WRANGLER_CONFIG}" ]]; then
             echo "::error::Rendered Wrangler config was not created."
