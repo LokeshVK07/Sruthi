@@ -3,23 +3,7 @@ const DEFAULT_SYNC_PATH = "/sruthi-sync.json";
 const TELUGU_ID_PREFIX = "telugu:";
 const TELUGU_LIBRARY_LIMIT = 2000;
 const HOMEPAGE_RECENT_WINDOW_DAYS = 30;
-const DEFAULT_TAMIL_OFFICIAL_PLAYLISTS = [
-  { id: "top-100", name: "Top 100", sourceUrl: "https://www.masstamilan.dev/playlists/top-100-songs" },
-  { id: "bgm-50", name: "BGM 50", sourceUrl: "https://www.masstamilan.dev/playlists/top-50-bgm-songs" },
-  { id: "sai-top-50", name: "Sai Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/sai-abhyankkar-top-50-songs" },
-  { id: "sean-roldan-top-50", name: "Sean Roldan Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/sean-roldan-top-50-songs" },
-  { id: "vijay-antony-top-50", name: "Vijay Antony Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/vijay-antony-top-50-songs" },
-  { id: "hiphop-tamizha-kuthu", name: "Hiphop Tamizha Kuthu", sourceUrl: "https://www.masstamilan.dev/playlists/hiphop-tamizha-top-50-songs" },
-  { id: "deva-top-50", name: "Deva Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/deva-top-50-songs" },
-  { id: "anirudh-maxxx", name: "Anirudh Maxxx", sourceUrl: "https://www.masstamilan.dev/playlists/anirudh-ravichander-top-50-songs" },
-  { id: "santhosh-narayanan-melody", name: "Santhosh Narayanan Melody", sourceUrl: "https://www.masstamilan.dev/playlists/santhosh-narayanan-top-50-songs" },
-  { id: "arr-top-50", name: "ARR Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/a-r-rahman-top-50-songs" },
-  { id: "ilaiyaraaja-top-50", name: "Ilaiyaraaja Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/ilaiyaraaja-top-50-songs" },
-  { id: "imman-top-50", name: "Imman Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/d-imman-top-50-songs" },
-  { id: "yuvan-top-50", name: "Yuvan Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/yuvan-shankar-raja-top-50-songs" },
-  { id: "harris-hits", name: "Harris Hits", sourceUrl: "https://www.masstamilan.dev/playlists/harris-jayaraj-top-50-songs" },
-  { id: "g-v-prakash-top-50", name: "G. V. Prakash Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/g-v-prakash-kumar-top-50-songs" },
-];
+const DEFAULT_TAMIL_OFFICIAL_PLAYLISTS = [];
 
 function catalogLanguage(env) {
   return cleanText(env?.CATALOG_LANGUAGE).toLowerCase() === "telugu" ? "telugu" : "tamil";
@@ -660,13 +644,13 @@ async function handleApi(request, env, url, ctx) {
   }
 
   if (url.pathname === "/api/playlists") {
-    await ensureOfficialPlaylistTables(env);
+    await clearOfficialPlaylistTables(env);
     const playlists = await listOfficialPlaylists(env, { includeSongIds: false });
     return json({ playlists });
   }
 
   if (url.pathname === "/api/playlist") {
-    await ensureOfficialPlaylistTables(env);
+    await clearOfficialPlaylistTables(env);
     const playlistId = cleanText(url.searchParams.get("id"));
     if (!playlistId) return json({ error: "Playlist id is required." }, 400);
     const playlist = await loadOfficialPlaylistDetail(env, playlistId);
@@ -707,13 +691,8 @@ async function handleApi(request, env, url, ctx) {
     if (configuredToken && suppliedToken !== configuredToken) {
       return json({ error: "Unauthorized." }, 401);
     }
-    const payload = await request.json().catch(() => ({}));
-    const playlists = normalizeSyncPlaylists(payload);
-    await ensureOfficialPlaylistTables(env);
-    for (const playlist of playlists) {
-      await upsertOfficialPlaylist(env, playlist);
-    }
-    return json({ ok: true, imported: playlists.length });
+    await clearOfficialPlaylistTables(env);
+    return json({ ok: true, imported: 0 });
   }
 
   if (url.pathname === "/api/warmup") {
@@ -942,10 +921,7 @@ async function runScheduledSync(env) {
       }
     }
 
-    await ensureOfficialPlaylistTables(env);
-    for (const playlist of playlists) {
-      await upsertOfficialPlaylist(env, playlist);
-    }
+    await clearOfficialPlaylistTables(env);
 
     const finishedAt = nowIso();
     await env.DB.batch([
@@ -1025,6 +1001,14 @@ async function ensureOfficialPlaylistTables(env) {
   ]);
 }
 
+async function clearOfficialPlaylistTables(env) {
+  await ensureOfficialPlaylistTables(env);
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM official_playlist_songs"),
+    env.DB.prepare("DELETE FROM official_playlists"),
+  ]);
+}
+
 async function insertSyncRun(env, startedAt) {
   const result = await env.DB.prepare(
     `
@@ -1058,7 +1042,7 @@ function normalizeSyncPayload(payload) {
 }
 
 function normalizeSyncPlaylists(payload) {
-  const playlists = Array.isArray(payload?.playlists) ? payload.playlists : [];
+  const playlists = [];
   return playlists
     .map((playlist) => normalizePlaylist(playlist))
     .filter((playlist) => playlist.id && playlist.name);
@@ -1298,14 +1282,7 @@ async function listOfficialPlaylists(env, { includeSongIds = true } = {}) {
     ORDER BY lower(name) ASC
     `,
   ).all();
-  const defaults = defaultOfficialPlaylists(env);
-  const results = (rows.results || []).length ? (rows.results || []) : defaults.map((playlist) => ({
-    id: playlist.id,
-    name: playlist.name,
-    source_url: playlist.sourceUrl,
-    updated_at: null,
-    song_count: 0,
-  }));
+  const results = rows.results || [];
   const playlists = [];
   for (const row of results) {
     let songIds = [];
@@ -1354,17 +1331,7 @@ async function loadOfficialPlaylistDetail(env, playlistId) {
     LIMIT 1
     `,
   ).bind(playlistId).first();
-  if (!row) {
-    const fallback = defaultOfficialPlaylists(env).find((playlist) => playlist.id === playlistId);
-    if (!fallback) return null;
-    row = {
-      id: fallback.id,
-      name: fallback.name,
-      source_url: fallback.sourceUrl,
-      updated_at: null,
-      song_count: 0,
-    };
-  }
+  if (!row) return null;
 
   const songIds = await officialPlaylistSongIds(env, playlistId, cleanText(row.name));
   const songs = await loadSongsByIds(env, songIds);
