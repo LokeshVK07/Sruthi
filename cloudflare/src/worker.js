@@ -168,12 +168,8 @@ async function fetchArtworkResponse(env, request, songId) {
       if (!response.ok) {
         continue;
       }
-      if (!isTeluguSongId(songId) && imageUrl !== originalImageUrl) {
-        ctxWaitUntilSafe(
-          env.DB.prepare("UPDATE songs SET image_url = ?, updated_at = ? WHERE id = ?")
-            .bind(imageUrl, nowIso(), cleanText(songId))
-            .run(),
-        );
+      if (imageUrl !== originalImageUrl) {
+        ctxWaitUntilSafe(persistSongArtwork(env, songId, imageUrl));
       }
       const headers = new Headers(response.headers);
       headers.set("Cache-Control", "public, max-age=86400");
@@ -252,6 +248,21 @@ async function fetchItunesArtworkCandidate(song) {
 
 function ctxWaitUntilSafe(promise) {
   promise.catch(() => {});
+}
+
+async function persistSongArtwork(env, songId, imageUrl) {
+  const cleanSongId = cleanText(songId);
+  const updatedAt = nowIso();
+  if (isTeluguSongId(cleanSongId)) {
+    if (!env.TELUGU_DB) return;
+    await env.TELUGU_DB.prepare("UPDATE songs SET image_url = ?, updated_at = ? WHERE id = ?")
+      .bind(imageUrl, updatedAt, rawTeluguSongId(cleanSongId))
+      .run();
+    return;
+  }
+  await env.DB.prepare("UPDATE songs SET image_url = ?, updated_at = ? WHERE id = ?")
+    .bind(imageUrl, updatedAt, cleanSongId)
+    .run();
 }
 
 async function fetchTeluguSongsBatch(env, ids) {
