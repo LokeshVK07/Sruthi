@@ -167,7 +167,8 @@ function currentArtworkUrl() {
 }
 
 function artworkUrlForSong(song) {
-  return currentArtworkUrl();
+  const imageUrl = sanitizeText(song?.imageUrl || song?.image_url);
+  return imageUrl || currentArtworkUrl();
 }
 
 function syncVolumeUi() {

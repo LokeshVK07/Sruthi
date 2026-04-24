@@ -1372,7 +1372,10 @@ async function listOfficialPlaylists(env, { includeSongIds = true } = {}) {
     GROUP BY
       p.id, p.name, p.slug, p.description, p.category, p.cover_url,
       p.tags, p.is_featured, p.created_at, p.updated_at
-    ORDER BY lower(p.category) ASC, lower(p.name) ASC
+    ORDER BY
+      CASE WHEN lower(p.slug) = 'vijay-hits' THEN 0 ELSE 1 END ASC,
+      lower(p.category) ASC,
+      lower(p.name) ASC
     `,
   ).all();
   const results = rows.results || [];
@@ -1620,6 +1623,26 @@ async function resolvePlaylistSongId(env, ref) {
 async function refreshAlbum(env, albumUrl, html) {
   const albumTracks = extractAlbumTracks(html);
   if (!albumTracks.length) return false;
+  const existingRows = await env.DB.prepare(
+    `
+    SELECT id, title, song_page_url
+    FROM songs
+    WHERE album_url = ?
+    `,
+  ).bind(albumUrl).all();
+  const existingByPageUrl = new Map();
+  const existingByTitleKey = new Map();
+  for (const row of existingRows.results || []) {
+    const pageUrl = cleanText(row.song_page_url);
+    if (pageUrl && !existingByPageUrl.has(pageUrl)) {
+      existingByPageUrl.set(pageUrl, row);
+    }
+    const titleKey = songIdentityKey(row.title);
+    if (!titleKey) continue;
+    const bucket = existingByTitleKey.get(titleKey) || [];
+    bucket.push(row);
+    existingByTitleKey.set(titleKey, bucket);
+  }
 
   const albumTitle = parseAlbumTitle(html) || "Untitled album";
   const year = parseYear(html, albumUrl);
@@ -1628,7 +1651,6 @@ async function refreshAlbum(env, albumUrl, html) {
 
   const statements = [];
   statements.push(
-    env.DB.prepare("DELETE FROM songs WHERE album_url = ?").bind(albumUrl),
     env.DB.prepare(
       `
       INSERT OR REPLACE INTO albums (
@@ -1646,6 +1668,8 @@ async function refreshAlbum(env, albumUrl, html) {
       composer,
       year,
       updatedAt,
+      existingByPageUrl,
+      existingByTitleKey,
     });
     statements.push(
       env.DB.prepare(
@@ -1681,6 +1705,32 @@ async function refreshAlbum(env, albumUrl, html) {
     );
   }
 
+  const refreshedSongIds = albumTracks
+    .map((track) => {
+      const payload = buildTrackPayload(track, {
+        albumUrl,
+        albumTitle,
+        composer,
+        year,
+        updatedAt,
+        existingByPageUrl,
+        existingByTitleKey,
+      });
+      return cleanText(payload.id);
+    })
+    .filter(Boolean);
+  const staleSongIds = (existingRows.results || [])
+    .map((row) => cleanText(row.id))
+    .filter((songId) => songId && !refreshedSongIds.includes(songId));
+  if (staleSongIds.length) {
+    const placeholders = staleSongIds.map(() => "?").join(", ");
+    statements.push(
+      env.DB.prepare(
+        `DELETE FROM songs WHERE album_url = ? AND id IN (${placeholders})`,
+      ).bind(albumUrl, ...staleSongIds),
+    );
+  }
+
   statements.push(
     env.DB.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('updatedAt', ?)").bind(updatedAt),
   );
@@ -1703,15 +1753,20 @@ function buildTrackPayload(track, context) {
   const downloadLinks = [];
   if (audio320) downloadLinks.push({ label: "320kbps", url: audio320, bitrate: 320 });
   if (audio128) downloadLinks.push({ label: "128kbps", url: audio128, bitrate: 128 });
+  const songPageUrl = cleanText(track.songPageUrl) || context.albumUrl;
+  const existingMatch = resolveExistingAlbumSong(context, {
+    title: cleanText(track.name),
+    songPageUrl,
+  });
   return {
-    id: String(track.id),
+    id: cleanText(existingMatch?.id) || String(track.id),
     album_url: context.albumUrl,
     title: cleanText(track.name) || "Untitled",
     artist: cleanText(track.artists) || "Unknown artist",
     composer: context.composer,
     movie: cleanText(track.m_name) || context.albumTitle,
     year: context.year,
-    song_page_url: cleanText(track.songPageUrl) || context.albumUrl,
+    song_page_url: songPageUrl,
     source_url: context.albumUrl,
     image_url: cleanText(track.img_name)
       ? absoluteUrl(`/uploads/album/${cleanText(track.img_name)}.jpg`, context.albumUrl)
@@ -1725,6 +1780,22 @@ function buildTrackPayload(track, context) {
     last_refreshed_at: context.updatedAt,
     updated_at: context.updatedAt,
   };
+}
+
+function songIdentityKey(value) {
+  return cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function resolveExistingAlbumSong(context, track) {
+  const pageUrl = cleanText(track.songPageUrl);
+  if (pageUrl && context.existingByPageUrl?.has(pageUrl)) {
+    return context.existingByPageUrl.get(pageUrl);
+  }
+  const titleKey = songIdentityKey(track.title);
+  if (!titleKey) return null;
+  const matches = context.existingByTitleKey?.get(titleKey) || [];
+  if (matches.length === 1) return matches[0];
+  return null;
 }
 
 function extractBitrateLink(downloadLinks, bitrate) {
