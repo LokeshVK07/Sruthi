@@ -1685,7 +1685,7 @@ async function refreshAlbum(env, albumUrl, html) {
   const existingByTitleKey = new Map();
   for (const row of existingRows.results || []) {
     const pageUrl = cleanText(row.song_page_url);
-    if (pageUrl && !existingByPageUrl.has(pageUrl)) {
+    if (pageUrl && pageUrl !== albumUrl && !existingByPageUrl.has(pageUrl)) {
       existingByPageUrl.set(pageUrl, row);
     }
     const titleKey = songIdentityKey(row.title);
@@ -1874,7 +1874,7 @@ function songIdentityKey(value) {
 
 function resolveExistingAlbumSong(context, track) {
   const pageUrl = cleanText(track.songPageUrl);
-  if (pageUrl && context.existingByPageUrl?.has(pageUrl)) {
+  if (pageUrl && pageUrl !== context.albumUrl && context.existingByPageUrl?.has(pageUrl)) {
     return context.existingByPageUrl.get(pageUrl);
   }
   const titleKey = songIdentityKey(track.title);

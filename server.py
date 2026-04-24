@@ -910,6 +910,8 @@ def build_existing_album_song_maps(connection, album_url):
     existing_by_title_key = {}
     for row in rows:
         for candidate in (clean_text(row["song_page_url"]), clean_text(row["source_url"])):
+            if not candidate or candidate == album_url:
+                continue
             if candidate and candidate not in existing_by_page_url:
                 existing_by_page_url[candidate] = row
         title_key = song_identity_key(row["title"])
@@ -919,8 +921,10 @@ def build_existing_album_song_maps(connection, album_url):
     return rows, existing_by_page_url, existing_by_title_key
 
 
-def resolve_existing_album_song(existing_by_page_url, existing_by_title_key, song_payload):
+def resolve_existing_album_song(album_url, existing_by_page_url, existing_by_title_key, song_payload):
     for candidate in (clean_text(song_payload.get("sourceUrl")), clean_text(song_payload.get("songPageUrl"))):
+        if not candidate or candidate == album_url:
+            continue
         if candidate and candidate in existing_by_page_url:
             return existing_by_page_url[candidate]
     title_key = song_identity_key(song_payload.get("title"))
@@ -1125,7 +1129,7 @@ def upsert_album_into_db(album_payload):
             payload = dict(song)
             payload["songPageUrl"] = clean_text(payload.get("songPageUrl") or payload.get("sourceUrl"))
             payload["sourceUrl"] = clean_text(payload.get("sourceUrl") or payload.get("songPageUrl") or album_url)
-            existing_match = resolve_existing_album_song(existing_by_page_url, existing_by_title_key, payload)
+            existing_match = resolve_existing_album_song(album_url, existing_by_page_url, existing_by_title_key, payload)
             if existing_match is not None:
                 payload["id"] = clean_text(existing_match["id"]) or payload.get("id")
             adjusted_songs_payload.append(payload)
