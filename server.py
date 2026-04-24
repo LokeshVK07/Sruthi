@@ -2322,6 +2322,50 @@ class CatalogHandler(SimpleHTTPRequestHandler):
             pass
         self.respond_json({"error": "Upstream stream unavailable."}, HTTPStatus.BAD_GATEWAY)
 
+    def handle_artwork_request(self, song_id):
+        song = load_song_record(song_id)
+        image_url = absolute_url(song.get("imageUrl")) if song else ""
+        if not image_url:
+            self.serve_default_artwork()
+            return
+
+        referer = absolute_url(song.get("albumUrl") or song.get("sourceUrl") or image_url)
+        request = Request(
+            image_url,
+            headers={
+                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "Referer": referer,
+                "Origin": origin_from_url(referer),
+                "User-Agent": UPSTREAM_USER_AGENT,
+            },
+        )
+        try:
+            with urlopen(request, timeout=UPSTREAM_PAGE_TIMEOUT_SECONDS) as response:
+                payload = response.read()
+                content_type = clean_text(response.headers.get("Content-Type")) or "image/jpeg"
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+        except (HTTPError, URLError, TimeoutError, ValueError):
+            self.serve_default_artwork()
+
+    def serve_default_artwork(self):
+        fallback_path = ROOT / "Sruthi_kutty.jpg"
+        if not fallback_path.exists():
+            self.respond_json({"error": "Artwork unavailable."}, HTTPStatus.NOT_FOUND)
+            return
+        payload = fallback_path.read_bytes()
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_GET(self):
         parsed = urlparse(self.path)
 
@@ -2361,6 +2405,12 @@ class CatalogHandler(SimpleHTTPRequestHandler):
         if parsed.path.startswith("/api/stream/"):
             song_id = parsed.path.rsplit("/", 1)[-1]
             self.handle_stream_request(song_id)
+            return
+
+        if parsed.path == "/api/artwork":
+            params = parse_qs(parsed.query)
+            song_id = params.get("id", [""])[0]
+            self.handle_artwork_request(song_id)
             return
 
         if parsed.path == "/api/library":

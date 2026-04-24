@@ -167,8 +167,10 @@ function currentArtworkUrl() {
 }
 
 function artworkUrlForSong(song) {
-  const imageUrl = sanitizeText(song?.imageUrl || song?.image_url);
-  return imageUrl || currentArtworkUrl();
+  const songId = sanitizeText(song?.id);
+  if (!songId) return currentArtworkUrl();
+  const version = encodeURIComponent(sanitizeText(song?.updatedAt || song?.lastRefreshedAt || song?.imageUrl || ""));
+  return `/api/artwork?id=${encodeURIComponent(songId)}${version ? `&v=${version}` : ""}`;
 }
 
 function syncVolumeUi() {

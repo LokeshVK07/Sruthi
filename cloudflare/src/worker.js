@@ -128,6 +128,49 @@ async function fetchTeluguSong(env, songId) {
   return decorateTeluguSong(rowToSong(row));
 }
 
+async function fetchArtworkResponse(env, request, songId) {
+  const song = isTeluguSongId(songId)
+    ? await fetchTeluguSong(env, songId)
+    : await (async () => {
+        const row = await env.DB.prepare(
+          `
+          SELECT id, album_url, title, artist, composer, movie, year, mood,
+                 song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+                 remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+          FROM songs
+          WHERE id = ?
+          `,
+        ).bind(songId).first();
+        return row ? rowToSong(row) : null;
+      })();
+
+  const imageUrl = cleanText(song?.imageUrl || song?.image_url);
+  if (!imageUrl) {
+    return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", request.url), request));
+  }
+
+  try {
+    const referer = cleanText(song?.albumUrl || song?.sourceUrl || imageUrl);
+    const response = await fetch(imageUrl, {
+      headers: {
+        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        Referer: referer,
+        Origin: originFromUrl(referer),
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      },
+    });
+    if (!response.ok) {
+      return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", request.url), request));
+    }
+    const headers = new Headers(response.headers);
+    headers.set("Cache-Control", "public, max-age=86400");
+    return withCors(new Response(response.body, { status: response.status, headers }));
+  } catch {
+    return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", request.url), request));
+  }
+}
+
 async function fetchTeluguSongsBatch(env, ids) {
   const rawIds = ids.map(rawTeluguSongId).filter(Boolean);
   if (!env.TELUGU_DB || !rawIds.length) return [];
@@ -625,6 +668,14 @@ async function handleApi(request, env, url, ctx) {
 
     if (!row) return json({ error: "Song not found." }, 404);
     return json(rowToSong(row));
+  }
+
+  if (url.pathname === "/api/artwork") {
+    const songId = cleanText(url.searchParams.get("id"));
+    if (!songId) {
+      return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", url), request));
+    }
+    return fetchArtworkResponse(env, request, songId);
   }
 
   if (url.pathname === "/api/songs-batch" && request.method === "POST") {
