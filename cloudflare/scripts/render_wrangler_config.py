@@ -53,19 +53,24 @@ def main():
   config_dir = input_path.parent
   
   databases = config.get("d1_databases") or []
+  filtered = []
   for db in databases:
     if db.get("binding") == "DB":
       db["database_id"] = args.database_id
       db["database_name"] = args.database_name
+      filtered.append(db)
     elif db.get("binding") == "TELUGU_DB":
-      # If we have telugu IDs passed in, use them. Otherwise keep placeholders or fail?
-      # For unified deploy, we need both.
-      telugu_id = getattr(args, "telugu_database_id", None)
-      telugu_name = getattr(args, "telugu_database_name", None)
+      telugu_id = args.telugu_database_id
+      telugu_name = args.telugu_database_name
       if telugu_id:
         db["database_id"] = telugu_id
-      if telugu_name:
-        db["database_name"] = telugu_name
+        if telugu_name:
+          db["database_name"] = telugu_name
+        filtered.append(db)
+      # No telugu ID supplied — drop the binding so the worker falls back to TELUGU_API_ORIGIN.
+    else:
+      filtered.append(db)
+  config["d1_databases"] = filtered
 
   main_path = config.get("main")
   if not main_path:

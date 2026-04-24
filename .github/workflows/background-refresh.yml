@@ -231,9 +231,12 @@ jobs:
             raise SystemExit(f"Rendered Wrangler assets directory is invalid: {assets_dir}")
           if not d1_databases:
             raise SystemExit("Rendered Wrangler config has no d1_databases entry.")
+          for db in d1_databases:
+            db_id = db.get("database_id", "")
+            db_name = db.get("database_name", "")
+            if not db_id or not db_name or db_id.endswith("_D1_ID") or db_name.endswith("_D1_NAME"):
+              raise SystemExit(f"Rendered Wrangler config has unresolved placeholder in binding {db.get('binding')!r}: id={db_id!r} name={db_name!r}")
           database = d1_databases[0]
-          if not database.get("database_id") or not database.get("database_name"):
-            raise SystemExit("Rendered Wrangler config is missing D1 database_id or database_name.")
 
           print({
             "main": str(main_path),

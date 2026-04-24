@@ -344,7 +344,7 @@ def upgrade_itunes_artwork_url(url):
     return upgraded or text
 
 
-def score_itunes_result(song, item):
+def score_itunes_result(song, item, language="tamil"):
     title_key = metadata_key(song.get("title"))
     movie_key = metadata_key(song.get("movie"))
     composer_key = metadata_key(song.get("composer"))
@@ -363,7 +363,7 @@ def score_itunes_result(song, item):
         score += 60
     if composer_key and composer_key and composer_key in artist_key:
         score += 25
-    if genre_key == "tamil":
+    if genre_key == language:
         score += 20
     try:
         if as_int(item.get("trackCount")):
@@ -373,15 +373,16 @@ def score_itunes_result(song, item):
     return score
 
 
-def fetch_itunes_artwork_candidate(song):
+def fetch_itunes_artwork_candidate(song, language="tamil"):
     terms = []
     title = clean_text(song.get("title"))
     movie = clean_text(song.get("movie"))
     composer = clean_text(song.get("composer"))
+    lang_label = language.capitalize()
     if title or movie:
-        terms.append(("song", " ".join(part for part in (title, movie, composer, "Tamil") if part)))
+        terms.append(("song", " ".join(part for part in (title, movie, composer, lang_label) if part)))
     if movie:
-        terms.append(("album", " ".join(part for part in (movie, composer, "Tamil") if part)))
+        terms.append(("album", " ".join(part for part in (movie, composer, lang_label) if part)))
 
     best_item = None
     best_score = 0
@@ -409,7 +410,7 @@ def fetch_itunes_artwork_candidate(song):
             artwork = upgrade_itunes_artwork_url(item.get("artworkUrl100") or item.get("artworkUrl60"))
             if not artwork:
                 continue
-            score = score_itunes_result(song, item)
+            score = score_itunes_result(song, item, language)
             if score > best_score:
                 best_score = score
                 best_item = artwork
@@ -520,14 +521,14 @@ def parse_album_title_from_html(html):
     return short_text(strip_html_tags(unescape(match.group(1))) if match else "", 180)
 
 
-def extract_album_links_from_html(html):
+def extract_album_links_from_html(html, base_origin=None):
     if not html:
         return []
     matches = re.findall(r'href=["\']([^"\']*?-songs(?:\?[^"\']*)?)["\']', html, re.IGNORECASE)
     links = []
     seen = set()
     for match in matches:
-        url = absolute_url(unescape(match))
+        url = absolute_url(unescape(match), base_origin or SITE_ORIGIN)
         if not url or url in seen:
             continue
         seen.add(url)
@@ -1206,8 +1207,12 @@ def sync_db_from_catalog(raw_catalog):
         )
 
 
-def upsert_album_into_db(album_payload):
-    ensure_db()
+def upsert_album_into_db(album_payload, db_path=None):
+    target_db = Path(db_path) if db_path else DB_PATH
+    if target_db == DB_PATH:
+        ensure_db()
+    elif not target_db.exists():
+        return False
     album = normalize_album(album_payload)
     album_url = clean_text(album.get("url"))
     if not album_url:
@@ -1216,7 +1221,7 @@ def upsert_album_into_db(album_payload):
     songs_payload = [build_song_from_track(album, track) for track in album.get("tracks", [])]
     updated_at = utc_now()
 
-    with get_db_connection() as connection:
+    with get_sqlite_connection(target_db) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         existing_rows, existing_by_page_url, existing_by_title_key = build_existing_album_song_maps(connection, album_url)
         existing_song_ids = {clean_text(row["id"]) for row in existing_rows if clean_text(row["id"])}
@@ -1922,8 +1927,13 @@ def fetch_remote_text(url):
 
 
 def try_refresh_song_link(song_id):
-    if is_telugu_song_id(song_id):
+    storage = get_song_storage(song_id)
+    db_path = storage["db_path"]
+    source_origin = storage["source_fallback"]
+
+    if db_path == TELUGU_DB_PATH and not telugu_catalog_enabled():
         return None
+
     row = load_song_db_row(song_id)
     if row is None:
         return None
@@ -1933,7 +1943,7 @@ def try_refresh_song_link(song_id):
     seen_pages = set()
 
     def push_candidate(url):
-        absolute = absolute_url(url)
+        absolute = absolute_url(url, source_origin)
         if not absolute or absolute in seen_pages:
             return
         seen_pages.add(absolute)
@@ -1959,7 +1969,7 @@ def try_refresh_song_link(song_id):
             continue
 
         if "window.albumTracks" not in html:
-            for discovered in extract_album_links_from_html(html):
+            for discovered in extract_album_links_from_html(html, base_origin=source_origin):
                 push_candidate(discovered)
             continue
 
@@ -1972,7 +1982,7 @@ def try_refresh_song_link(song_id):
         }
 
         try:
-            if not upsert_album_into_db(album_payload):
+            if not upsert_album_into_db(album_payload, db_path=db_path):
                 continue
         except Exception:
             continue
