@@ -11,6 +11,8 @@ def parse_args():
   parser.add_argument("--output", type=Path, required=True)
   parser.add_argument("--database-id", required=True)
   parser.add_argument("--database-name", required=True)
+  parser.add_argument("--telugu-database-id", default="")
+  parser.add_argument("--telugu-database-name", default="")
   parser.add_argument("--account-id", default="")
   return parser.parse_args()
 
@@ -49,11 +51,21 @@ def main():
 
   config = json.loads(input_path.read_text(encoding="utf-8"))
   config_dir = input_path.parent
+  
   databases = config.get("d1_databases") or []
-  if not databases:
-    raise RuntimeError("wrangler config has no d1_databases entry.")
-  databases[0]["database_id"] = args.database_id
-  databases[0]["database_name"] = args.database_name
+  for db in databases:
+    if db.get("binding") == "DB":
+      db["database_id"] = args.database_id
+      db["database_name"] = args.database_name
+    elif db.get("binding") == "TELUGU_DB":
+      # If we have telugu IDs passed in, use them. Otherwise keep placeholders or fail?
+      # For unified deploy, we need both.
+      telugu_id = getattr(args, "telugu_database_id", None)
+      telugu_name = getattr(args, "telugu_database_name", None)
+      if telugu_id:
+        db["database_id"] = telugu_id
+      if telugu_name:
+        db["database_name"] = telugu_name
 
   main_path = config.get("main")
   if not main_path:

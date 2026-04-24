@@ -100,10 +100,12 @@ def catalog_config(catalog: str):
   }
 
 
-def load_repo_variables(repo: str, config: dict):
+def load_repo_variables(repo: str):
   raw = run(["gh", "variable", "list", "--repo", repo, "--json", "name,value"], capture=True)
   rows = json.loads(raw)
-  variables = {row["name"]: row["value"] for row in rows}
+  return {row["name"]: row["value"] for row in rows}
+
+def validate_variables(variables: dict, config: dict):
   required = [
     "CLOUDFLARE_ACCOUNT_ID",
     config["db_a_id_var"],
@@ -115,7 +117,6 @@ def load_repo_variables(repo: str, config: dict):
   missing = [name for name in required if not variables.get(name)]
   if missing:
     raise SystemExit(f"Missing required GitHub repo variables for deploy: {', '.join(missing)}")
-  return variables
 
 
 def resolve_target_slot(variables, config: dict):
@@ -162,26 +163,25 @@ def build_release(config: dict):
   )
 
 
-def render_config(database_id: str, database_name: str, account_id: str, wrangler_config: Path):
+def render_config(database_id: str, database_name: str, account_id: str, wrangler_config: Path, telugu_id: str = "", telugu_name: str = ""):
   GENERATED_DIR.mkdir(parents=True, exist_ok=True)
   suffix = ".telugu" if wrangler_config.name == "wrangler.telugu.jsonc" else ""
   output = GENERATED_DIR / f"wrangler.deploy{suffix}.jsonc"
-  run(
-    [
-      "python3",
-      str(CLOUDFLARE_DIR / "scripts" / "render_wrangler_config.py"),
-      "--input",
-      str(wrangler_config),
-      "--output",
-      str(output),
-      "--database-id",
-      database_id,
-      "--database-name",
-      database_name,
-      "--account-id",
-      account_id,
-    ]
-  )
+  cmd = [
+    "python3",
+    str(CLOUDFLARE_DIR / "scripts" / "render_wrangler_config.py"),
+    "--input", str(wrangler_config),
+    "--output", str(output),
+    "--database-id", database_id,
+    "--database-name", database_name,
+    "--account-id", account_id,
+  ]
+  if telugu_id:
+    cmd.extend(["--telugu-database-id", telugu_id])
+  if telugu_name:
+    cmd.extend(["--telugu-database-name", telugu_name])
+  
+  run(cmd)
   ensure_file(output)
   return output
 
@@ -308,8 +308,20 @@ def main():
   if not args.skip_asset_sync:
     sync_public_bundle()
 
-  variables = load_repo_variables(args.repo, config)
+  variables = load_repo_variables(args.repo)
+  validate_variables(variables, config)
   target = resolve_target_slot(variables, config)
+
+  telugu_id = ""
+  telugu_name = ""
+  if args.catalog == "tamil":
+    telugu_active = variables.get("SRUTHI_TELUGU_ACTIVE_D1_SLOT", "A").strip().upper()
+    if telugu_active == "A":
+      telugu_id = variables.get("SRUTHI_TELUGU_D1_DB_A_ID", "")
+      telugu_name = variables.get("SRUTHI_TELUGU_D1_DB_A_NAME", "")
+    else:
+      telugu_id = variables.get("SRUTHI_TELUGU_D1_DB_B_ID", "")
+      telugu_name = variables.get("SRUTHI_TELUGU_D1_DB_B_NAME", "")
 
   if not args.skip_release_build:
     build_release(config)
@@ -319,6 +331,8 @@ def main():
     target["database_name"],
     variables["CLOUDFLARE_ACCOUNT_ID"],
     config["wrangler_config"],
+    telugu_id=telugu_id,
+    telugu_name=telugu_name,
   )
   validate_rendered_config(config_path)
   manifest = load_manifest(config["manifest"])

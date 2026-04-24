@@ -1324,14 +1324,16 @@ async function loadCollectionView() {
           0,
           Number(payload?.songCount || songIds.length || songs.length),
         );
-        playlist.songIds = songIds;
-        playlist.songCount = playlistSongCount;
-        const rawSongs = songIds.map((songId) => state.songCache.get(songId)).filter(Boolean);
+        const mergedSongIds = Array.from(new Set([...(playlist.songIds || []), ...songIds]));
+        playlist.songIds = mergedSongIds;
+        playlist.songCount = Math.max(playlist.songCount || 0, playlistSongCount, mergedSongIds.length);
+        
+        const rawSongs = mergedSongIds.map((id) => state.songCache.get(id)).filter(Boolean);
         const filtered = filterClientSongs(rawSongs);
         state.songs = filtered;
         state.totalSongs = (state.query || state.decade !== "all" || state.localSongs)
           ? filtered.length
-          : playlistSongCount;
+          : playlist.songCount;
         state.hasMore = false;
         state.offset = filtered.length;
         if (!state.selectedSongId && filtered.length) state.selectedSongId = filtered[0].id;
@@ -1517,7 +1519,8 @@ function renderSongs() {
     fragment.append(row);
   });
   nodes.songList.append(fragment);
-  nodes.loadMore.hidden = state.currentView !== "all" || !state.hasMore;
+  const isAllView = state.currentView === "all";
+  nodes.loadMore.hidden = !isAllView || !state.hasMore;
   renderFavorites();
   renderPlaylists();
   renderSelectedSong();
@@ -2168,8 +2171,11 @@ async function switchView(view, playlistId = null) {
   renderPlaylists();
   renderCuratedPlaylistShelf();
   if (view === "playlist") {
-    state.songs = [];
-    state.totalSongs = currentPlaylist()?.songCount || 0;
+    const playlist = currentPlaylist();
+    if (state.currentPlaylistId !== playlistId) {
+      state.songs = [];
+      state.totalSongs = playlist?.songCount || 0;
+    }
     renderSongs();
   }
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -2220,7 +2226,9 @@ async function loadAppState() {
 
 async function loadLibrary({ reset = false } = {}) {
   if (state.currentView !== "all") {
-    await loadCollectionView();
+    if (reset) {
+      await loadCollectionView();
+    }
     return;
   }
   if (state.loading) return;

@@ -49,6 +49,11 @@ COMPOSER_ALIAS_MAP = {
     "yuvan shankar raja": {"yuvan shankar raja", "yuvan"},
 }
 
+ACTOR_ALIAS_MAP = {
+    "vijay": {"vijay", "joseph vijay", "c joseph vijay", "thalapathy vijay"},
+    "ajith": {"ajith", "ajith kumar", "thala ajith"},
+}
+
 NOISE_TOKENS = {
     "en",
     "in",
@@ -64,6 +69,16 @@ NOISE_TOKENS = {
     "tamil",
 }
 
+COMMON_PERSON_TOKENS = {
+    "kumar",
+    "raja",
+    "raj",
+    "devi",
+    "sri",
+    "babu",
+    "amma",
+}
+
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat()
@@ -71,6 +86,10 @@ def utc_now():
 
 def clean_text(value):
     return " ".join(str(value or "").split()).strip()
+
+
+def strip_markup_text(value):
+    return clean_text(re.sub(r"<[^>]+>", " ", str(value or "")))
 
 
 def slugify(value):
@@ -117,6 +136,31 @@ def normalize_name_tokens(value):
     if compact:
         values.add(compact)
     return values
+
+
+def actor_tokens_for_name(value):
+    identity = normalize_song_title(value)
+    aliases = set(ACTOR_ALIAS_MAP.get(identity, set()))
+    raw_value = clean_text(strip_markup_text(value))
+    if raw_value:
+        aliases.add(raw_value)
+        aliases.add(raw_value.replace(".", " "))
+    normalized = set()
+    for alias in aliases:
+        alias_norm = normalize_song_title(alias)
+        alias_compact = compact_normalized_title(alias)
+        if alias_norm:
+            normalized.add(alias_norm)
+        if alias_compact and alias_compact != alias_norm.replace(" ", ""):
+            normalized.add(alias_compact)
+    return {alias for alias in normalized if alias}
+
+
+def split_people(value):
+    text = strip_markup_text(value)
+    if not text:
+        return []
+    return [clean_text(part) for part in re.split(r"\s*,\s*", text) if clean_text(part)]
 
 
 def timestamp_or_default(value):
@@ -227,7 +271,20 @@ def fetch_song_catalog(connection):
         song["composer_norm"] = normalize_song_title(song.get("composer_source"))
         song["composer_compact"] = compact_normalized_title(song.get("composer_source"))
         song["artist_norm"] = normalize_song_title(song.get("artist") or song.get("singers"))
-        song["starring_norm"] = normalize_song_title(song.get("starring"))
+        song["starring_text"] = strip_markup_text(song.get("starring"))
+        song["starring_norm"] = normalize_song_title(song.get("starring_text"))
+        song["starring_compact"] = compact_normalized_title(song.get("starring_text"))
+        song["starring_tokens"] = tuple(title_tokens(song.get("starring_text"), include_noise=True))
+        song["starring_people_norms"] = tuple(
+            normalize_song_title(person)
+            for person in split_people(song.get("starring_text"))
+            if normalize_song_title(person)
+        )
+        song["starring_people_compacts"] = tuple(
+            compact_normalized_title(person)
+            for person in split_people(song.get("starring_text"))
+            if compact_normalized_title(person)
+        )
         song["mood_norm"] = normalize_song_title(song.get("mood"))
         songs.append(song)
     return songs
@@ -252,7 +309,7 @@ def playlist_seed_context(seed):
     return {
         "category": clean_text(seed.get("category")),
         "year_window": parse_year_window(seed.get("name")),
-        "actor_tokens": normalize_name_tokens(playlist_primary_identity(seed)) if clean_text(seed.get("category")) == "actor" else set(),
+        "actor_tokens": actor_tokens_for_name(playlist_primary_identity(seed)) if clean_text(seed.get("category")) == "actor" else set(),
         "composer_aliases": composer_aliases_for_seed(seed),
         "prefer_newer": clean_text(seed.get("category")) == "era",
     }
@@ -278,6 +335,25 @@ def composer_match_state(song, composer_aliases):
         if alias_text and (alias_text in composer_norm or composer_norm in alias_text):
             return "match"
         if alias_compact and (alias_compact in composer_compact or composer_compact in alias_compact):
+            return "match"
+    return "mismatch"
+
+
+def actor_match_state(song, actor_tokens):
+    if not actor_tokens:
+        return "not_applicable"
+    starring_people_norms = set(song.get("starring_people_norms") or ())
+    starring_people_compacts = set(song.get("starring_people_compacts") or ())
+    if not starring_people_norms and not starring_people_compacts:
+        return "missing"
+    for token in actor_tokens:
+        token_text = clean_text(token)
+        if not token_text:
+            continue
+        token_compact = token_text.replace(" ", "")
+        if token_text in starring_people_norms:
+            return "match"
+        if token_compact and token_compact in starring_people_compacts:
             return "match"
     return "mismatch"
 
@@ -338,10 +414,9 @@ def movie_matches(seed_movie, song):
     return False
 
 
-def candidate_rank(song, match, context, composer_state):
+def candidate_rank(song, match, context, composer_state, actor_state):
     year = safe_int(song.get("year"))
     year_window = context.get("year_window")
-    actor_tokens = context.get("actor_tokens") or set()
     rank = [
         -int(match["tier"] == 1),
         -int(match["tier"] == 2),
@@ -350,8 +425,9 @@ def candidate_rank(song, match, context, composer_state):
         -int(match["tier"] == 5),
         -int(composer_state == "match"),
         -int(composer_state == "missing"),
+        -int(actor_state == "match"),
+        -int(actor_state == "missing"),
         -int(bool(year_window) and year_window[0] <= year <= year_window[1]),
-        -int(bool(actor_tokens) and any(token and token in clean_text(song.get("starring_norm")) for token in actor_tokens)),
         -int(round(match["score"] * 1000)),
     ]
     if context.get("prefer_newer"):
@@ -399,13 +475,16 @@ def resolve_seed_song(seed, seed_title, seed_movie, all_songs, song_indexes, log
         if not movie_matches(seed_movie, song):
             continue
         composer_state = composer_match_state(song, context["composer_aliases"])
+        actor_state = actor_match_state(song, context["actor_tokens"])
         if composer_state == "mismatch":
             composer_mismatch_count += 1
-            mismatch_rank = candidate_rank(song, match, context, composer_state)
+            mismatch_rank = candidate_rank(song, match, context, composer_state, actor_state)
             if best_mismatch is None or mismatch_rank < best_mismatch[0]:
                 best_mismatch = (mismatch_rank, song)
             continue
-        matching_candidates.append((candidate_rank(song, match, context, composer_state), song, composer_state))
+        if actor_state == "mismatch":
+            continue
+        matching_candidates.append((candidate_rank(song, match, context, composer_state, actor_state), song, composer_state, actor_state))
 
     if not matching_candidates:
         if composer_mismatch_count:
@@ -417,7 +496,7 @@ def resolve_seed_song(seed, seed_title, seed_movie, all_songs, song_indexes, log
         return None, "missing", 0
 
     matching_candidates.sort()
-    best_rank, best_song, composer_state = matching_candidates[0]
+    best_rank, best_song, composer_state, actor_state = matching_candidates[0]
     equally_ranked = [item for item in matching_candidates if item[0] == best_rank]
     if len(equally_ranked) > 1:
         return None, "ambiguous", composer_mismatch_count
@@ -434,25 +513,23 @@ def collect_profile(seed, matched_songs):
     actor_tokens = set()
     composer_tokens = set()
     mood_tokens = set()
+    category = clean_text(seed.get("category"))
 
     identity = playlist_primary_identity(seed)
-    if seed.get("category") == "actor":
-        actor_tokens |= normalize_name_tokens(identity)
-    elif seed.get("category") == "music_director":
+    if category == "actor":
+        actor_tokens |= actor_tokens_for_name(identity)
+    elif category == "music_director":
         composer_tokens |= composer_aliases_for_seed(seed)
-    elif seed.get("category") == "mood":
+    elif category == "mood":
         mood_tokens |= normalize_name_tokens(identity)
 
     composer_counts = Counter()
-    starring_counts = Counter()
     year_counts = Counter()
     mood_counts = Counter()
     for song in matched_songs:
-        if clean_text(song.get("composer_source")):
+        if category == "music_director" and clean_text(song.get("composer_source")):
             composer_counts[song["composer_norm"]] += 1
-        if clean_text(song.get("starring")):
-            starring_counts[song["starring_norm"]] += 1
-        if clean_text(song.get("mood")) and clean_text(song.get("mood")).lower() != "imported":
+        if category == "mood" and clean_text(song.get("mood")) and clean_text(song.get("mood")).lower() != "imported":
             mood_counts[song["mood_norm"]] += 1
         if safe_int(song.get("year")):
             year_counts[safe_int(song["year"])] += 1
@@ -460,9 +537,6 @@ def collect_profile(seed, matched_songs):
     for token, count in composer_counts.most_common(4):
         if token and count > 0:
             composer_tokens.add(token)
-    for token, count in starring_counts.most_common(4):
-        if token and count > 0:
-            actor_tokens.add(token)
     for token, count in mood_counts.most_common(3):
         if token and count > 0:
             mood_tokens.add(token)
@@ -481,6 +555,7 @@ def collect_profile(seed, matched_songs):
 
 def score_candidate(song, profile):
     score = 0
+    actor_required = bool(profile["actor_tokens"])
 
     if profile["year_window"]:
         start, end = profile["year_window"]
@@ -488,9 +563,12 @@ def score_candidate(song, profile):
         if start <= song_year <= end:
             score += 40
 
-    if profile["actor_tokens"] and song.get("starring_norm"):
-        if any(token and token in song["starring_norm"] for token in profile["actor_tokens"]):
+    if actor_required:
+        actor_state = actor_match_state(song, profile["actor_tokens"])
+        if actor_state == "match":
             score += 60
+        else:
+            return 0
 
     if profile["composer_tokens"]:
         composer_fields = {clean_text(song.get("composer_norm")), normalize_song_title(song.get("album_music_director"))}
@@ -606,6 +684,17 @@ def upsert_playlist(connection, seed, song_ids, cover_url, tags_json):
         playlist_id = int(cursor.lastrowid)
         created = True
 
+    desired_song_ids = []
+    seen_song_ids = set()
+    for song_id in song_ids:
+        clean_song_id = clean_text(song_id)
+        if not clean_song_id or clean_song_id in seen_song_ids:
+            continue
+        desired_song_ids.append(clean_song_id)
+        seen_song_ids.add(clean_song_id)
+        if len(desired_song_ids) >= 100:
+            break
+
     previous_count = safe_int(
         connection.execute("SELECT COUNT(*) FROM playlist_items WHERE playlist_id = ?", (playlist_id,)).fetchone()[0]
     )
@@ -614,14 +703,18 @@ def upsert_playlist(connection, seed, song_ids, cover_url, tags_json):
         for row in connection.execute("SELECT song_id FROM playlist_items WHERE playlist_id = ?", (playlist_id,)).fetchall()
         if clean_text(row["song_id"])
     }
+    if desired_song_ids:
+        placeholders = ",".join("?" for _ in desired_song_ids)
+        connection.execute(
+            f"DELETE FROM playlist_items WHERE playlist_id = ? AND song_id NOT IN ({placeholders})",
+            (playlist_id, *desired_song_ids),
+        )
+    else:
+        connection.execute("DELETE FROM playlist_items WHERE playlist_id = ?", (playlist_id,))
     inserted_count = 0
-    remaining_new_slots = max(0, 100 - previous_count)
-    for position, song_id in enumerate(song_ids, start=1):
-        if song_id not in existing_song_ids and remaining_new_slots <= 0:
-            continue
+    for position, song_id in enumerate(desired_song_ids, start=1):
         if song_id not in existing_song_ids:
             inserted_count += 1
-            remaining_new_slots -= 1
         connection.execute(
             """
             INSERT INTO playlist_items (playlist_id, song_id, position, created_at)

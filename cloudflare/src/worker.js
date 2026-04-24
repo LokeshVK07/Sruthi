@@ -74,63 +74,54 @@ async function fetchTeluguAppState(env) {
   }
 }
 
-async function fetchTeluguLibrary(env, { query, movie, decade }) {
-  if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) {
+async function fetchTeluguLibrary(env, { query, movie, decade, offset, limit }) {
+  if (!env.TELUGU_DB) {
     return { songs: [], total: 0 };
   }
-  const params = new URLSearchParams({
-    query,
-    movie,
-    decade,
-    localSongs: "false",
-    offset: "0",
-    limit: String(TELUGU_LIBRARY_LIMIT),
-  });
-  try {
-    const response = await fetchTeluguResponse(env, `/api/library?${params.toString()}`);
-    if (!response.ok) return { songs: [], total: 0 };
-    const payload = await response.json();
-    const songs = Array.isArray(payload?.songs) ? payload.songs.map(decorateTeluguSong).filter(Boolean) : [];
-    return {
-      songs,
-      total: Number(payload?.total || songs.length),
-    };
-  } catch {
-    return { songs: [], total: 0 };
-  }
+  // We can't easily call handleApi internally, so we use queryLocalLibrary but on TELUGU_DB
+  const payload = await queryLocalLibrary(env, { query, movie, decade, offset, limit }, env.TELUGU_DB);
+  return {
+    songs: (payload.songs || []).map(decorateTeluguSong),
+    total: payload.total,
+  };
 }
 
 async function fetchTeluguSong(env, songId) {
   const rawId = rawTeluguSongId(songId);
-  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !rawId) return null;
-  try {
-    const response = await fetchTeluguResponse(env, `/api/song?id=${encodeURIComponent(rawId)}`);
-    if (!response.ok) return null;
-    const payload = await response.json();
-    return decorateTeluguSong(payload);
-  } catch {
-    return null;
-  }
+  if (!env.TELUGU_DB || !rawId) return null;
+  const row = await env.TELUGU_DB.prepare(
+    `
+    SELECT id, album_url, title, artist, composer, movie, year, mood,
+           song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+           remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+    FROM songs
+    WHERE id = ?
+    `,
+  ).bind(rawId).first();
+  if (!row) return null;
+  return decorateTeluguSong(rowToSong(row));
 }
 
 async function fetchTeluguSongsBatch(env, ids) {
-  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !ids.length) return [];
   const rawIds = ids.map(rawTeluguSongId).filter(Boolean);
-  if (!rawIds.length) return [];
-  try {
-    const response = await fetchTeluguResponse(env, "/api/songs-batch", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ ids: rawIds }),
-    });
-    if (!response.ok) return [];
-    const payload = await response.json();
-    return Array.isArray(payload?.songs) ? payload.songs.map(decorateTeluguSong).filter(Boolean) : [];
-  } catch {
-    return [];
+  if (!env.TELUGU_DB || !rawIds.length) return [];
+  const chunkSize = 90;
+  const songs = [];
+  for (let offset = 0; offset < rawIds.length; offset += chunkSize) {
+    const chunk = rawIds.slice(offset, offset + chunkSize);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const result = await env.TELUGU_DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      WHERE id IN (${placeholders})
+      `,
+    ).bind(...chunk).all();
+    songs.push(...(result.results || []).map((row) => decorateTeluguSong(rowToSong(row))));
   }
+  return songs;
 }
 
 async function proxyTeluguJson(env, path, init = {}) {
@@ -328,7 +319,8 @@ function compareLibrarySongs(left, right, query, options = {}) {
   return cleanText(left?.title).toLowerCase().localeCompare(cleanText(right?.title).toLowerCase());
 }
 
-async function queryLocalLibrary(env, { query, movie, decade, offset, limit }) {
+async function queryLocalLibrary(env, { query, movie, decade, offset, limit }, targetDb = null) {
+  const db = targetDb || env.DB;
   const bindings = [];
   const filters = [
     "lower(title) NOT LIKE '%verifying you are human%'",
@@ -398,14 +390,14 @@ async function queryLocalLibrary(env, { query, movie, decade, offset, limit }) {
     lower(title) ASC
   `;
 
-  const countStmt = env.DB.prepare(`SELECT COUNT(*) AS count FROM songs ${whereClause}`).bind(...bindings);
+  const countStmt = db.prepare(`SELECT COUNT(*) AS count FROM songs ${whereClause}`).bind(...bindings);
   const rankBindings = query
     ? [query, `${query}%`, query, `${query}%`, query, `${query}%`, query, `${query}%`, query, query, query, query]
     : [];
   const rowsBindings = homepage
     ? [...bindings, homepageRecentCutoffIso(), homepageRecentCutoffIso(), limit, offset]
     : [...bindings, ...rankBindings, limit, offset];
-  const rowsStmt = env.DB.prepare(
+  const rowsStmt = db.prepare(
     `
     SELECT id, album_url, title, artist, composer, movie, year, mood,
            song_page_url, source_url, image_url, audio_128_url, audio_320_url,
@@ -1436,23 +1428,56 @@ async function loadOfficialPlaylistDetail(env, playlistId) {
 async function loadSongsByIds(env, ids) {
   const uniqueIds = [...new Set((ids || []).map(cleanText).filter(Boolean))];
   if (!uniqueIds.length) return [];
-  const chunkSize = 90;
-  const rows = [];
-  for (let offset = 0; offset < uniqueIds.length; offset += chunkSize) {
-    const chunk = uniqueIds.slice(offset, offset + chunkSize);
-    const placeholders = chunk.map(() => "?").join(", ");
-    const result = await env.DB.prepare(
-      `
-      SELECT id, album_url, title, artist, composer, movie, year, mood,
-             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-      FROM songs
-      WHERE id IN (${placeholders})
-      `,
-    ).bind(...chunk).all();
-    rows.push(...(result.results || []));
+
+  const tamilIds = uniqueIds.filter(id => !isTeluguSongId(id));
+  const teluguIds = uniqueIds.filter(id => isTeluguSongId(id));
+  const byId = new Map();
+
+  if (tamilIds.length) {
+    const chunkSize = 90;
+    for (let offset = 0; offset < tamilIds.length; offset += chunkSize) {
+      const chunk = tamilIds.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const result = await env.DB.prepare(
+        `
+        SELECT id, album_url, title, artist, composer, movie, year, mood,
+               song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+               remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+        FROM songs
+        WHERE id IN (${placeholders})
+        `,
+      ).bind(...chunk).all();
+      (result.results || []).forEach(row => byId.set(cleanText(row.id), rowToSong(row)));
+    }
   }
-  const byId = new Map(rows.map((item) => [cleanText(item.id), rowToSong(item)]));
+
+  if (teluguIds.length) {
+    if (env.TELUGU_DB) {
+      const rawIds = teluguIds.map(rawTeluguSongId).filter(Boolean);
+      const chunkSize = 90;
+      for (let offset = 0; offset < rawIds.length; offset += chunkSize) {
+        const chunk = rawIds.slice(offset, offset + chunkSize);
+        const placeholders = chunk.map(() => "?").join(", ");
+        const result = await env.TELUGU_DB.prepare(
+          `
+          SELECT id, album_url, title, artist, composer, movie, year, mood,
+                 song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+                 remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+          FROM songs
+          WHERE id IN (${placeholders})
+          `,
+        ).bind(...chunk).all();
+        (result.results || []).forEach(row => {
+          const song = decorateTeluguSong(rowToSong(row));
+          if (song) byId.set(song.id, song);
+        });
+      }
+    } else {
+      const teluguSongs = await fetchTeluguSongsBatch(env, teluguIds);
+      teluguSongs.forEach(song => byId.set(song.id, song));
+    }
+  }
+
   return uniqueIds.map((id) => byId.get(id)).filter(Boolean);
 }
 
