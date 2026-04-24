@@ -332,6 +332,103 @@ def absolute_url(url, base_origin=None):
     return f"{origin}/{text.lstrip('/')}"
 
 
+def metadata_key(value):
+    return re.sub(r"[^a-z0-9]+", " ", clean_text(value).lower()).strip()
+
+
+def upgrade_itunes_artwork_url(url):
+    text = clean_text(url)
+    if not text:
+        return ""
+    upgraded = re.sub(r"/\d+x\d+bb(?:-\d+)?\.(jpg|png)$", r"/1200x1200bb.\1", text)
+    return upgraded or text
+
+
+def score_itunes_result(song, item):
+    title_key = metadata_key(song.get("title"))
+    movie_key = metadata_key(song.get("movie"))
+    composer_key = metadata_key(song.get("composer"))
+    track_key = metadata_key(item.get("trackName") or item.get("collectionName"))
+    collection_key = metadata_key(item.get("collectionName"))
+    genre_key = metadata_key(item.get("primaryGenreName"))
+    artist_key = metadata_key(item.get("artistName"))
+    score = 0
+    if title_key and track_key == title_key:
+        score += 120
+    elif title_key and title_key and title_key in track_key:
+        score += 70
+    if movie_key and collection_key == movie_key:
+        score += 90
+    elif movie_key and movie_key in collection_key:
+        score += 60
+    if composer_key and composer_key and composer_key in artist_key:
+        score += 25
+    if genre_key == "tamil":
+        score += 20
+    try:
+        if as_int(item.get("trackCount")):
+            score += min(10, as_int(item.get("trackCount")))
+    except Exception:
+        pass
+    return score
+
+
+def fetch_itunes_artwork_candidate(song):
+    terms = []
+    title = clean_text(song.get("title"))
+    movie = clean_text(song.get("movie"))
+    composer = clean_text(song.get("composer"))
+    if title or movie:
+        terms.append(("song", " ".join(part for part in (title, movie, composer, "Tamil") if part)))
+    if movie:
+        terms.append(("album", " ".join(part for part in (movie, composer, "Tamil") if part)))
+
+    best_item = None
+    best_score = 0
+    for entity, term in terms:
+        if not term:
+            continue
+        target = (
+            "https://itunes.apple.com/search"
+            f"?term={quote_plus(term)}&entity={quote_plus(entity)}&country=IN&limit=10"
+        )
+        request = Request(
+            target,
+            headers={
+                "Accept": "application/json",
+                "User-Agent": UPSTREAM_USER_AGENT,
+            },
+        )
+        try:
+            with urlopen(request, timeout=UPSTREAM_PAGE_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8", "ignore"))
+        except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
+            continue
+
+        for item in payload.get("results", []) or []:
+            artwork = upgrade_itunes_artwork_url(item.get("artworkUrl100") or item.get("artworkUrl60"))
+            if not artwork:
+                continue
+            score = score_itunes_result(song, item)
+            if score > best_score:
+                best_score = score
+                best_item = artwork
+
+    return best_item if best_score >= 80 else ""
+
+
+def persist_song_artwork(song_id, image_url):
+    storage = get_song_storage(song_id)
+    db_path = storage.get("db_path")
+    if not db_path or not clean_text(image_url):
+        return
+    with get_sqlite_connection(db_path) as connection:
+        connection.execute(
+            "UPDATE songs SET image_url = ?, updated_at = ? WHERE id = ?",
+            (clean_text(image_url), utc_now(), storage.get("song_id")),
+        )
+
+
 def infer_bitrate_url(url, bitrate):
     value = absolute_url(url)
     if not value:
@@ -2426,34 +2523,45 @@ class CatalogHandler(SimpleHTTPRequestHandler):
 
     def handle_artwork_request(self, song_id):
         song = load_song_record(song_id)
-        image_url = absolute_url(song.get("imageUrl")) if song else ""
-        if not image_url:
-            self.serve_default_artwork()
-            return
+        attempted = set()
+        candidates = []
+        if song:
+            candidates.append(absolute_url(song.get("imageUrl")))
+        fallback_candidate = fetch_itunes_artwork_candidate(song or {})
+        if fallback_candidate:
+            candidates.append(fallback_candidate)
 
-        referer = absolute_url(song.get("albumUrl") or song.get("sourceUrl") or image_url)
-        request = Request(
-            image_url,
-            headers={
-                "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                "Referer": referer,
-                "Origin": origin_from_url(referer),
-                "User-Agent": UPSTREAM_USER_AGENT,
-            },
-        )
-        try:
-            with urlopen(request, timeout=UPSTREAM_PAGE_TIMEOUT_SECONDS) as response:
-                payload = response.read()
-                content_type = clean_text(response.headers.get("Content-Type")) or "image/jpeg"
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", content_type)
-                self.send_header("Content-Length", str(len(payload)))
-                self.send_header("Cache-Control", "public, max-age=86400")
-                self.end_headers()
-                self.wfile.write(payload)
-                return
-        except (HTTPError, URLError, TimeoutError, ValueError):
-            self.serve_default_artwork()
+        for image_url in candidates:
+            image_url = absolute_url(image_url)
+            if not image_url or image_url in attempted:
+                continue
+            attempted.add(image_url)
+            referer = absolute_url(song.get("albumUrl") or song.get("sourceUrl") or image_url) if song else image_url
+            request = Request(
+                image_url,
+                headers={
+                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                    "Referer": referer,
+                    "Origin": origin_from_url(referer),
+                    "User-Agent": UPSTREAM_USER_AGENT,
+                },
+            )
+            try:
+                with urlopen(request, timeout=UPSTREAM_PAGE_TIMEOUT_SECONDS) as response:
+                    payload = response.read()
+                    content_type = clean_text(response.headers.get("Content-Type")) or "image/jpeg"
+                    if song and image_url != absolute_url(song.get("imageUrl")):
+                        persist_song_artwork(song_id, image_url)
+                    self.send_response(HTTPStatus.OK)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.send_header("Cache-Control", "public, max-age=86400")
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
+            except (HTTPError, URLError, TimeoutError, ValueError):
+                continue
+        self.serve_default_artwork()
 
     def serve_default_artwork(self):
         fallback_path = ROOT / "Sruthi_kutty.jpg"

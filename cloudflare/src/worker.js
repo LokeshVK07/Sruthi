@@ -144,31 +144,114 @@ async function fetchArtworkResponse(env, request, songId) {
         return row ? rowToSong(row) : null;
       })();
 
-  const imageUrl = cleanText(song?.imageUrl || song?.image_url);
-  if (!imageUrl) {
-    return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", request.url), request));
+  const originalImageUrl = cleanText(song?.imageUrl || song?.image_url);
+  const candidates = [originalImageUrl];
+  const fallbackArtwork = await fetchItunesArtworkCandidate(song);
+  if (fallbackArtwork) {
+    candidates.push(fallbackArtwork);
   }
 
-  try {
-    const referer = cleanText(song?.albumUrl || song?.sourceUrl || imageUrl);
-    const response = await fetch(imageUrl, {
-      headers: {
-        Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        Referer: referer,
-        Origin: originFromUrl(referer),
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      },
-    });
-    if (!response.ok) {
-      return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", request.url), request));
+  for (const rawImageUrl of candidates) {
+    const imageUrl = cleanText(rawImageUrl);
+    if (!imageUrl) continue;
+    try {
+      const referer = cleanText(song?.albumUrl || song?.sourceUrl || imageUrl);
+      const response = await fetch(imageUrl, {
+        headers: {
+          Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+          Referer: referer,
+          Origin: originFromUrl(referer),
+          "User-Agent":
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        },
+      });
+      if (!response.ok) {
+        continue;
+      }
+      if (!isTeluguSongId(songId) && imageUrl !== originalImageUrl) {
+        ctxWaitUntilSafe(
+          env.DB.prepare("UPDATE songs SET image_url = ?, updated_at = ? WHERE id = ?")
+            .bind(imageUrl, nowIso(), cleanText(songId))
+            .run(),
+        );
+      }
+      const headers = new Headers(response.headers);
+      headers.set("Cache-Control", "public, max-age=86400");
+      return withCors(new Response(response.body, { status: response.status, headers }));
+    } catch {
+      continue;
     }
-    const headers = new Headers(response.headers);
-    headers.set("Cache-Control", "public, max-age=86400");
-    return withCors(new Response(response.body, { status: response.status, headers }));
-  } catch {
-    return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", request.url), request));
   }
+
+  return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", request.url), request));
+}
+
+function metadataKey(value) {
+  return cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function upgradeItunesArtworkUrl(url) {
+  const text = cleanText(url);
+  if (!text) return "";
+  return text.replace(/\/\d+x\d+bb(?:-\d+)?\.(jpg|png)$/i, "/1200x1200bb.$1");
+}
+
+function scoreItunesResult(song, item) {
+  const titleKey = metadataKey(song?.title);
+  const movieKey = metadataKey(song?.movie);
+  const composerKey = metadataKey(song?.composer);
+  const trackKey = metadataKey(item?.trackName || item?.collectionName);
+  const collectionKey = metadataKey(item?.collectionName);
+  const artistKey = metadataKey(item?.artistName);
+  const genreKey = metadataKey(item?.primaryGenreName);
+  let score = 0;
+  if (titleKey && trackKey === titleKey) score += 120;
+  else if (titleKey && trackKey.includes(titleKey)) score += 70;
+  if (movieKey && collectionKey === movieKey) score += 90;
+  else if (movieKey && collectionKey.includes(movieKey)) score += 60;
+  if (composerKey && artistKey.includes(composerKey)) score += 25;
+  if (genreKey === "tamil") score += 20;
+  if (Number(item?.trackCount || 0) > 0) score += Math.min(10, Number(item.trackCount || 0));
+  return score;
+}
+
+async function fetchItunesArtworkCandidate(song) {
+  const terms = [];
+  const title = cleanText(song?.title);
+  const movie = cleanText(song?.movie);
+  const composer = cleanText(song?.composer);
+  if (title || movie) terms.push({ entity: "song", term: [title, movie, composer, "Tamil"].filter(Boolean).join(" ") });
+  if (movie) terms.push({ entity: "album", term: [movie, composer, "Tamil"].filter(Boolean).join(" ") });
+
+  let bestUrl = "";
+  let bestScore = 0;
+  for (const { entity, term } of terms) {
+    if (!term) continue;
+    try {
+      const response = await fetch(
+        `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=${encodeURIComponent(entity)}&country=IN&limit=10`,
+        { headers: { Accept: "application/json" } },
+      );
+      if (!response.ok) continue;
+      const payload = await response.json();
+      for (const item of Array.isArray(payload?.results) ? payload.results : []) {
+        const artworkUrl = upgradeItunesArtworkUrl(item?.artworkUrl100 || item?.artworkUrl60);
+        if (!artworkUrl) continue;
+        const score = scoreItunesResult(song, item);
+        if (score > bestScore) {
+          bestScore = score;
+          bestUrl = artworkUrl;
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+  return bestScore >= 80 ? bestUrl : "";
+}
+
+function ctxWaitUntilSafe(promise) {
+  promise.catch(() => {});
 }
 
 async function fetchTeluguSongsBatch(env, ids) {
