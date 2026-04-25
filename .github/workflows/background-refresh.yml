@@ -116,6 +116,7 @@ jobs:
             "cloudflare/public/styles.css"
             "cloudflare/scripts/render_wrangler_config.py"
             "cloudflare/scripts/prepare_release.py"
+            "cloudflare/scripts/bootstrap_local_db_from_d1.py"
             "cloudflare/scripts/export_d1_sql.py"
             "cloudflare/data/release-baseline.json"
             "tools/masstamilan_refresh.py"
@@ -302,6 +303,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p data
+          python cloudflare/scripts/bootstrap_local_db_from_d1.py \
+            --db data/sruthi.db \
+            --config "${GENERATED_WRANGLER_CONFIG}" \
+            --database "${ACTIVE_DB_NAME}"
+
           npx wrangler d1 execute "${ACTIVE_DB_NAME}" \
             --remote \
             --command "SELECT url FROM albums WHERE url IS NOT NULL ORDER BY url;" \
