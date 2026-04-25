@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       full_refresh:
-        description: Set to false to run incremental mode (only new albums)
+        description: Force a full re-fetch of every album (ignores recency cache)
         required: false
-        default: true
+        default: false
         type: boolean
   schedule:
     - cron: "17 */3 * * *"
@@ -134,9 +134,9 @@ jobs:
       - name: Resolve run mode
         run: |
           set -euo pipefail
-          full_refresh="true"
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "false" ]]; then
-            full_refresh="false"
+          full_refresh="false"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "true" ]]; then
+            full_refresh="true"
           fi
           echo "SRUTHI_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
 
@@ -336,10 +336,10 @@ jobs:
           args=(
             --workers 3
             --batch-size 9
-            --page-delay 0.5
-            --album-delay 0.8
+            --page-delay 1.2
+            --album-delay 1.5
             --retry-count 5
-            --retry-base-delay 2
+            --retry-base-delay 3
             --known-urls-file data/known-albums.txt
           )
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
