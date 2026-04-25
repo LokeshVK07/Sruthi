@@ -954,12 +954,37 @@ async function handleStream(songId, request, env, ctx) {
     if (cached) return withCors(cached);
   }
 
-  // Telugu songs are always proxied to the dedicated Telugu worker.
-  // Querying env.TELUGU_DB directly from the Tamil worker leads to stale-link
-  // failures with no refresh path, and tryRefreshSongLink breaks because the
-  // raw DB row has no "telugu:" prefix on its id field.
   if (isTeluguSongId(songId)) {
-    return proxyTeluguStream(env, request, rawTeluguSongId(songId));
+    const rawId = rawTeluguSongId(songId);
+    if (env.TELUGU_DB && rawId) {
+      let row = await env.TELUGU_DB.prepare(
+        `
+        SELECT id, album_url, title, artist, composer, movie, year, mood,
+               song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+               remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+        FROM songs
+        WHERE id = ?
+        `,
+      ).bind(rawId).first();
+      if (row) {
+        let response = await tryAudioCandidates(row, request, true);
+        if (response && !range) {
+          ctx?.waitUntil(caches.default.put(request, response.clone()));
+        }
+        if (response) return response;
+
+        const refreshed = await tryRefreshSongLink(env, row, env.TELUGU_DB);
+        if (refreshed) {
+          row = refreshed;
+          response = await tryAudioCandidates(row, request, true);
+          if (response && !range) {
+            ctx?.waitUntil(caches.default.put(request, response.clone()));
+          }
+          if (response) return response;
+        }
+      }
+    }
+    return proxyTeluguStream(env, request, rawId);
   }
 
   const db = env.DB;
@@ -1022,10 +1047,12 @@ async function tryAudioCandidates(row, request, isTelugu = false) {
 }
 
 async function fetchAudio(target, albumUrl, rangeHeader) {
+  const referer = cleanText(albumUrl) || SITE_ORIGIN;
   const headers = new Headers({
     Accept: "audio/mpeg,audio/*;q=0.9,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    Referer: cleanText(albumUrl) || SITE_ORIGIN,
+    Referer: referer,
+    Origin: originFromUrl(referer, SITE_ORIGIN),
     "User-Agent":
       "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   });
@@ -1053,11 +1080,9 @@ async function fetchAudio(target, albumUrl, rangeHeader) {
   });
 }
 
-async function tryRefreshSongLink(env, row) {
+async function tryRefreshSongLink(env, row, dbOverride = null) {
   if (!row?.id) return null;
-  // Telugu songs are never refreshed from the Tamil worker — the proxy path handles them.
-  if (isTeluguSongId(row.id)) return null;
-  const db = env.DB;
+  const db = dbOverride || env.DB;
   const rawId = row.id;
   if (!db) return null;
 
