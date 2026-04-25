@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       full_refresh:
-        description: Run a full catalog refresh instead of incremental mode
+        description: Set to false to run incremental mode (only new albums)
         required: false
-        default: false
+        default: true
         type: boolean
   schedule:
     - cron: "17 */3 * * *"
@@ -134,9 +134,9 @@ jobs:
       - name: Resolve run mode
         run: |
           set -euo pipefail
-          full_refresh="false"
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "true" ]]; then
-            full_refresh="true"
+          full_refresh="true"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "false" ]]; then
+            full_refresh="false"
           fi
           echo "SRUTHI_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
 
