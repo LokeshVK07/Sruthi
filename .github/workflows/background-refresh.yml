@@ -166,6 +166,20 @@ jobs:
           echo "TARGET_DB_NAME=$db_name" >> "$GITHUB_ENV"
           echo "TARGET_SLOT=$target" >> "$GITHUB_ENV"
 
+      - name: Resolve active Tamil D1 slot for incremental bootstrap
+        run: |
+          set -euo pipefail
+          active="${SRUTHI_ACTIVE_D1_SLOT:-A}"
+          if [[ "$active" == "B" ]]; then
+            db_id="${SRUTHI_D1_DB_B_ID}"
+            db_name="${SRUTHI_D1_DB_B_NAME}"
+          else
+            db_id="${SRUTHI_D1_DB_A_ID}"
+            db_name="${SRUTHI_D1_DB_A_NAME}"
+          fi
+          echo "ACTIVE_DB_ID=$db_id" >> "$GITHUB_ENV"
+          echo "ACTIVE_DB_NAME=$db_name" >> "$GITHUB_ENV"
+
       - name: Resolve active Telugu D1 slot for worker binding
         run: |
           set -euo pipefail
@@ -287,6 +301,32 @@ jobs:
       - name: Refresh catalog from MassTamilan
         run: |
           set -euo pipefail
+          mkdir -p data
+          npx wrangler d1 execute "${ACTIVE_DB_NAME}" \
+            --remote \
+            --command "SELECT url FROM albums WHERE url IS NOT NULL ORDER BY url;" \
+            --config "${GENERATED_WRANGLER_CONFIG}" \
+            --json > /tmp/active-albums.json
+
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/active-albums.json").read_text())
+          urls = set()
+          stack = [payload]
+          while stack:
+            item = stack.pop()
+            if isinstance(item, dict):
+              if "url" in item and item["url"]:
+                urls.add(str(item["url"]).strip())
+              stack.extend(item.values())
+            elif isinstance(item, list):
+              stack.extend(item)
+          Path("data/known-albums.txt").write_text("\n".join(sorted(urls)) + ("\n" if urls else ""), encoding="utf-8")
+          print({"knownAlbums": len(urls)})
+          PY
+
           workers="$(python - <<'PY'
           import os
           cpu_count = os.cpu_count() or 4
@@ -301,6 +341,7 @@ jobs:
             --album-delay 0.12
             --retry-count 5
             --retry-base-delay 2
+            --known-urls-file data/known-albums.txt
           )
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
             args+=(--full)

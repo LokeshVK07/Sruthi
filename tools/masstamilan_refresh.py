@@ -62,6 +62,7 @@ def parse_args():
     parser.add_argument("--movie-index-stop-after-known-pages", type=int, default=120)
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--print-summary-only", action="store_true")
+    parser.add_argument("--known-urls-file", default="", help="Optional newline-delimited album URL file used for incremental stopping")
     return parser.parse_args()
 
 
@@ -552,9 +553,20 @@ def parse_album_page(html, album_seed):
     }
 
 
-def load_processed_urls():
+def load_processed_urls(known_urls_file=""):
+    processed = set()
+    known_file = Path(clean_text(known_urls_file)) if clean_text(known_urls_file) else None
+    if known_file and known_file.exists():
+        processed.update(
+            to_absolute(line)
+            for line in known_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if clean_text(line)
+        )
+        processed = {item for item in processed if item}
+
     server.ensure_db()
-    return set(server.load_processed_urls())
+    processed.update(server.load_processed_urls())
+    return processed
 
 
 def build_album_seeds(session, args, processed_urls):
@@ -708,7 +720,7 @@ def main():
         return 0
 
     session = make_session()
-    processed_urls = load_processed_urls()
+    processed_urls = load_processed_urls(args.known_urls_file)
     listing_album_seeds, total_pages = build_album_seeds(session, args, processed_urls)
     movie_index_album_seeds = build_movie_index_album_seeds(session, args, processed_urls)
     album_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
