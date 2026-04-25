@@ -102,31 +102,70 @@ async function fetchTeluguAppState(env) {
 }
 
 async function fetchTeluguLibrary(env, { query, movie, decade, offset = 0, limit = TELUGU_LIBRARY_LIMIT }) {
-  if (!env.TELUGU_DB) {
+  if (env.TELUGU_DB) {
+    // We can't easily call handleApi internally, so we use queryLocalLibrary but on TELUGU_DB
+    const payload = await queryLocalLibrary(env, { query, movie, decade, offset, limit }, env.TELUGU_DB);
+    return {
+      songs: (payload.songs || []).map(decorateTeluguSong),
+      total: payload.total,
+    };
+  }
+
+  if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) {
     return { songs: [], total: 0 };
   }
-  // We can't easily call handleApi internally, so we use queryLocalLibrary but on TELUGU_DB
-  const payload = await queryLocalLibrary(env, { query, movie, decade, offset, limit }, env.TELUGU_DB);
-  return {
-    songs: (payload.songs || []).map(decorateTeluguSong),
-    total: payload.total,
-  };
+
+  const params = new URLSearchParams({
+    query: cleanText(query),
+    movie: cleanText(movie),
+    decade: cleanText(decade) || "all",
+    offset: String(Number(offset) || 0),
+    limit: String(Number(limit) || TELUGU_LIBRARY_LIMIT),
+  });
+
+  try {
+    const response = await fetchTeluguResponse(env, `/api/library?${params.toString()}`);
+    if (!response.ok) return { songs: [], total: 0 };
+    const payload = await response.json();
+    return {
+      songs: (payload.songs || []).map(decorateTeluguSong).filter(Boolean),
+      total: Number(payload.total || 0),
+    };
+  } catch {
+    return { songs: [], total: 0 };
+  }
 }
 
 async function fetchTeluguSong(env, songId) {
   const rawId = rawTeluguSongId(songId);
-  if (!env.TELUGU_DB || !rawId) return null;
-  const row = await env.TELUGU_DB.prepare(
-    `
-    SELECT id, album_url, title, artist, composer, movie, year, mood,
-           song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
-           remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-    FROM songs
-    WHERE id = ?
-    `,
-  ).bind(rawId).first();
-  if (!row) return null;
-  return decorateTeluguSong(rowToSong(row));
+  if (!rawId) return null;
+
+  if (env.TELUGU_DB) {
+    const row = await env.TELUGU_DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      WHERE id = ?
+      `,
+    ).bind(rawId).first();
+    if (!row) return null;
+    return decorateTeluguSong(rowToSong(row));
+  }
+
+  if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) {
+    return null;
+  }
+
+  try {
+    const response = await fetchTeluguResponse(env, `/api/song?id=${encodeURIComponent(rawId)}`);
+    if (!response.ok) return null;
+    const payload = await response.json();
+    return decorateTeluguSong(payload);
+  } catch {
+    return null;
+  }
 }
 
 async function fetchArtworkResponse(env, request, songId) {
@@ -320,24 +359,44 @@ async function persistSongArtwork(env, songId, imageUrl) {
 
 async function fetchTeluguSongsBatch(env, ids) {
   const rawIds = ids.map(rawTeluguSongId).filter(Boolean);
-  if (!env.TELUGU_DB || !rawIds.length) return [];
-  const chunkSize = 90;
-  const songs = [];
-  for (let offset = 0; offset < rawIds.length; offset += chunkSize) {
-    const chunk = rawIds.slice(offset, offset + chunkSize);
-    const placeholders = chunk.map(() => "?").join(", ");
-    const result = await env.TELUGU_DB.prepare(
-      `
-      SELECT id, album_url, title, artist, composer, movie, year, mood,
-             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-      FROM songs
-      WHERE id IN (${placeholders})
-      `,
-    ).bind(...chunk).all();
-    songs.push(...(result.results || []).map((row) => decorateTeluguSong(rowToSong(row))));
+  if (!rawIds.length) return [];
+
+  if (env.TELUGU_DB) {
+    const chunkSize = 90;
+    const songs = [];
+    for (let offset = 0; offset < rawIds.length; offset += chunkSize) {
+      const chunk = rawIds.slice(offset, offset + chunkSize);
+      const placeholders = chunk.map(() => "?").join(", ");
+      const result = await env.TELUGU_DB.prepare(
+        `
+        SELECT id, album_url, title, artist, composer, movie, year, mood,
+               song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+               remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+        FROM songs
+        WHERE id IN (${placeholders})
+        `,
+      ).bind(...chunk).all();
+      songs.push(...(result.results || []).map((row) => decorateTeluguSong(rowToSong(row))));
+    }
+    return songs;
   }
-  return songs;
+
+  if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) return [];
+
+  try {
+    const response = await fetchTeluguResponse(env, "/api/songs-batch", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ ids: rawIds }),
+    });
+    if (!response.ok) return [];
+    const payload = await response.json();
+    return (payload.songs || []).map(decorateTeluguSong).filter(Boolean);
+  } catch {
+    return [];
+  }
 }
 
 async function proxyTeluguJson(env, path, init = {}) {

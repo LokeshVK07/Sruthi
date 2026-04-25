@@ -8,6 +8,7 @@
   },
   "vars": {
     "CATALOG_LANGUAGE": "tamil",
+    "TELUGU_API_ORIGIN": "https://sruthi-telugu.vklokesh70.workers.dev",
     "SYNC_FEED_URL": "https://www.masstamilan.dev/sruthi-sync.json"
   },
   "d1_databases": [
@@ -15,6 +16,12 @@
       "binding": "DB",
       "database_name": "sruthi-db",
       "database_id": "TAMIL_D1_ID"
+    }
+  ],
+  "services": [
+    {
+      "binding": "TELUGU_SERVICE",
+      "service": "sruthi-telugu"
     }
   ]
 }
