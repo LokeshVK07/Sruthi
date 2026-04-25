@@ -333,18 +333,11 @@ jobs:
           print({"knownAlbums": len(urls)})
           PY
 
-          workers="$(python - <<'PY'
-          import os
-          cpu_count = os.cpu_count() or 4
-          print(max(4, min(12, cpu_count)))
-          PY
-          )"
-          batch_size="$(( workers * 3 ))"
           args=(
-            --workers "${workers}"
-            --batch-size "${batch_size}"
-            --page-delay 0.35
-            --album-delay 0.12
+            --workers 3
+            --batch-size 9
+            --page-delay 0.5
+            --album-delay 0.8
             --retry-count 5
             --retry-base-delay 2
             --known-urls-file data/known-albums.txt

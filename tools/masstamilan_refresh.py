@@ -553,6 +553,31 @@ def parse_album_page(html, album_seed):
     }
 
 
+def load_stale_album_urls_from_db(db_path, max_age_hours=2.5):
+    """Return album URLs from the local DB whose songs haven't been refreshed recently."""
+    import sqlite3
+    from datetime import datetime, timezone, timedelta
+
+    db = Path(clean_text(str(db_path)))
+    if not db.exists():
+        return set()
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        with sqlite3.connect(str(db)) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT album_url
+                FROM songs
+                WHERE album_url IS NOT NULL AND album_url != ''
+                  AND COALESCE(last_refreshed_at, updated_at, '') < ?
+                """,
+                (cutoff,),
+            ).fetchall()
+            return {row[0] for row in rows if row[0]}
+    except Exception:
+        return set()
+
+
 def load_processed_urls(known_urls_file=""):
     processed = set()
     known_file = Path(clean_text(known_urls_file)) if clean_text(known_urls_file) else None
@@ -724,7 +749,20 @@ def main():
     listing_album_seeds, total_pages = build_album_seeds(session, args, processed_urls)
     movie_index_album_seeds = build_movie_index_album_seeds(session, args, processed_urls)
     album_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
-    remaining = album_seeds
+
+    if args.full:
+        remaining = album_seeds
+    else:
+        # Refresh new albums + existing albums with stale audio URLs (token expiry)
+        stale_urls = load_stale_album_urls_from_db(server.DB_PATH, max_age_hours=2.5)
+        seed_url_set = {a["url"] for a in album_seeds}
+        # Pull in stale albums not reached by the crawl (crawl stops early in incremental mode)
+        extra_stale = [{"url": url, "title": ""} for url in stale_urls if url not in seed_url_set]
+        all_seeds = unique_by(album_seeds + extra_stale, lambda item: item["url"])
+        remaining = [
+            album for album in all_seeds
+            if album["url"] not in processed_urls or album["url"] in stale_urls
+        ]
 
     print(
         json.dumps(
@@ -736,6 +774,7 @@ def main():
                 "movieIndexDiscoveredAlbums": len(movie_index_album_seeds),
                 "discoveredAlbums": len(album_seeds),
                 "knownAlbums": len(processed_urls),
+                "staleAlbums": 0 if args.full else len(stale_urls),
                 "albumsToRefresh": len(remaining),
                 "fullRefresh": bool(args.full),
             },
