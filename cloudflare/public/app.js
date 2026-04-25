@@ -1489,7 +1489,7 @@ function renderSongs() {
     nodes.collectionDescription.classList.toggle("hidden", !description);
   }
   if (nodes.collectionActions) {
-    const showActions = state.currentView === "playlist" && state.songs.length > 0;
+    const showActions = (state.currentView === "playlist" || state.currentView === "favorites") && state.songs.length > 0;
     nodes.collectionActions.classList.toggle("hidden", !showActions);
   }
   nodes.collectionSortWrap.classList.toggle("hidden", state.currentView !== "favorites");
