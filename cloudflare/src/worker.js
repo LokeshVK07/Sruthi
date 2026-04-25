@@ -149,6 +149,8 @@ async function fetchArtworkResponse(env, request, songId) {
 
   const originalImageUrl = cleanText(song?.imageUrl || song?.image_url);
   const candidates = [originalImageUrl];
+  const pageCandidates = await fetchPageArtworkCandidates(song);
+  candidates.push(...pageCandidates);
   const fallbackArtwork = await fetchItunesArtworkCandidate(song, language);
   if (fallbackArtwork) {
     candidates.push(fallbackArtwork);
@@ -187,6 +189,52 @@ async function fetchArtworkResponse(env, request, songId) {
 
 function metadataKey(value) {
   return cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function decodeHtmlEntityText(value) {
+  return cleanText(value)
+    .replace(/&amp;/gi, "&")
+    .replace(/&#x27;|&#39;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+}
+
+function extractArtworkCandidatesFromHtml(html, baseUrl = SITE_ORIGIN) {
+  if (!html) return [];
+  const matches = [];
+  const patterns = [
+    /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/gi,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/gi,
+    /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/gi,
+    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']/gi,
+    /"image"\s*:\s*"([^"]+)"/gi,
+    /(?:src|href)=["']([^"']*\/uploads\/album\/[^"']+\.(?:jpg|jpeg|png|webp))["']/gi,
+  ];
+  for (const pattern of patterns) {
+    for (const match of html.matchAll(pattern)) {
+      const candidate = absoluteUrl(decodeHtmlEntityText(match[1]), baseUrl);
+      if (!candidate) continue;
+      if (candidate.includes("/cdn-cgi/") || candidate.includes("challenges.cloudflare.com")) continue;
+      matches.push(candidate);
+    }
+  }
+  return unique(matches);
+}
+
+async function fetchPageArtworkCandidates(song) {
+  const candidates = [];
+  const pages = unique([song?.albumUrl, song?.sourceUrl, song?.songPageUrl].map(cleanText).filter(Boolean));
+  for (const pageUrl of pages) {
+    const html = await fetchText(pageUrl);
+    if (!html) continue;
+    const extracted = extractArtworkCandidatesFromHtml(html, pageUrl);
+    if (extracted.length) {
+      candidates.push(...extracted);
+      break;
+    }
+  }
+  return unique(candidates);
 }
 
 function upgradeItunesArtworkUrl(url) {

@@ -15,6 +15,9 @@ permissions:
   contents: read
   actions: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 concurrency:
   group: sruthi-background-refresh-telugu
   cancel-in-progress: false
@@ -32,6 +35,11 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       GH_VARIABLES_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      SRUTHI_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_ACTIVE_D1_SLOT }}
+      SRUTHI_D1_DB_A_ID: ${{ vars.SRUTHI_D1_DB_A_ID }}
+      SRUTHI_D1_DB_A_NAME: ${{ vars.SRUTHI_D1_DB_A_NAME }}
+      SRUTHI_D1_DB_B_ID: ${{ vars.SRUTHI_D1_DB_B_ID }}
+      SRUTHI_D1_DB_B_NAME: ${{ vars.SRUTHI_D1_DB_B_NAME }}
       SRUTHI_TELUGU_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_TELUGU_ACTIVE_D1_SLOT }}
       SRUTHI_TELUGU_D1_DB_A_ID: ${{ vars.SRUTHI_TELUGU_D1_DB_A_ID }}
       SRUTHI_TELUGU_D1_DB_A_NAME: ${{ vars.SRUTHI_TELUGU_D1_DB_A_NAME }}
@@ -39,6 +47,7 @@ jobs:
       SRUTHI_TELUGU_D1_DB_B_NAME: ${{ vars.SRUTHI_TELUGU_D1_DB_B_NAME }}
       WRANGLER_SEND_METRICS: "false"
       GENERATED_WRANGLER_CONFIG: cloudflare/.generated/wrangler.deploy.telugu.jsonc
+      MAIN_GENERATED_WRANGLER_CONFIG: cloudflare/.generated/wrangler.deploy.main-from-telugu.jsonc
       RELEASE_MANIFEST: cloudflare/.generated/release-manifest-telugu.json
       RELEASE_DUCKDB: cloudflare/.generated/release-check-telugu.duckdb
       TELUGU_DATA_DIR: data/telugu
@@ -56,7 +65,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install workflow dependencies
         run: |
@@ -113,7 +122,9 @@ jobs:
             "cloudflare/scripts/prepare_release.py"
             "cloudflare/scripts/export_d1_sql.py"
             "cloudflare/data/release-baseline-telugu.json"
+            "cloudflare/wrangler.jsonc"
             "tools/masstelugu_refresh.py"
+            "tools/validate_stream_smoke.py"
             "server.py"
           )
 
@@ -159,6 +170,20 @@ jobs:
           echo "TARGET_DB_ID=$db_id" >> "$GITHUB_ENV"
           echo "TARGET_DB_NAME=$db_name" >> "$GITHUB_ENV"
           echo "TARGET_SLOT=$target" >> "$GITHUB_ENV"
+
+      - name: Resolve active Tamil D1 slot for main worker binding
+        run: |
+          set -euo pipefail
+          active="${SRUTHI_ACTIVE_D1_SLOT:-A}"
+          if [[ "$active" == "B" ]]; then
+            db_id="${SRUTHI_D1_DB_B_ID}"
+            db_name="${SRUTHI_D1_DB_B_NAME}"
+          else
+            db_id="${SRUTHI_D1_DB_A_ID}"
+            db_name="${SRUTHI_D1_DB_A_NAME}"
+          fi
+          echo "MAIN_TAMIL_DB_ID=$db_id" >> "$GITHUB_ENV"
+          echo "MAIN_TAMIL_DB_NAME=$db_name" >> "$GITHUB_ENV"
 
       - name: Verify GitHub variable update token access
         env:
@@ -297,7 +322,19 @@ jobs:
       - name: Import Telugu release into inactive D1 slot
         run: |
           set -euo pipefail
-          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+          retry() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then
+                return 1
+              fi
+              sleep $(( attempt * 10 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
             --file cloudflare/data/seed-telugu.sql \
             --config "${GENERATED_WRANGLER_CONFIG}"
@@ -305,12 +342,24 @@ jobs:
       - name: Validate inactive Telugu D1 slot
         run: |
           set -euo pipefail
-          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+          retry() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then
+                return 1
+              fi
+              sleep $(( attempt * 5 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
             --command "SELECT COUNT(*) AS count FROM albums;" \
             --config "${GENERATED_WRANGLER_CONFIG}" \
             --json > /tmp/albums.json
-          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+          retry 3 npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
             --command "SELECT COUNT(*) AS count FROM songs;" \
             --config "${GENERATED_WRANGLER_CONFIG}" \
@@ -342,7 +391,67 @@ jobs:
       - name: Deploy Telugu Worker after successful import and validation
         run: |
           set -euo pipefail
-          npx wrangler deploy --config "${GENERATED_WRANGLER_CONFIG}"
+          retry() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then
+                return 1
+              fi
+              sleep $(( attempt * 10 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler deploy --config "${GENERATED_WRANGLER_CONFIG}"
+
+      - name: Smoke test Telugu playback on Telugu worker
+        run: |
+          set -euo pipefail
+          python tools/validate_stream_smoke.py \
+            --db data/telugu/sruthi.db \
+            --origin https://sruthi-telugu.vklokesh70.workers.dev \
+            --sample-size 3 \
+            --label telugu-worker
+
+      - name: Render main-site Wrangler config with refreshed Telugu binding
+        run: |
+          set -euo pipefail
+          python cloudflare/scripts/render_wrangler_config.py \
+            --input cloudflare/wrangler.jsonc \
+            --output "${MAIN_GENERATED_WRANGLER_CONFIG}" \
+            --database-id "${MAIN_TAMIL_DB_ID}" \
+            --database-name "${MAIN_TAMIL_DB_NAME}" \
+            --telugu-database-id "${TARGET_DB_ID}" \
+            --telugu-database-name "${TARGET_DB_NAME}" \
+            --account-id "${CLOUDFLARE_ACCOUNT_ID}"
+
+      - name: Deploy main Worker with refreshed Telugu binding
+        run: |
+          set -euo pipefail
+          retry() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then
+                return 1
+              fi
+              sleep $(( attempt * 10 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler deploy --config "${MAIN_GENERATED_WRANGLER_CONFIG}"
+
+      - name: Smoke test Telugu playback on main site
+        run: |
+          set -euo pipefail
+          python tools/validate_stream_smoke.py \
+            --db data/telugu/sruthi.db \
+            --origin https://sruthi.vklokesh70.workers.dev \
+            --id-prefix telugu: \
+            --sample-size 3 \
+            --label telugu-main-site
 
       - name: Mark deployed Telugu D1 slot as active
         env:

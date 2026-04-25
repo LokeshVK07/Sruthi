@@ -15,6 +15,9 @@ permissions:
   contents: read
   actions: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 concurrency:
   group: sruthi-background-refresh-tamil
   cancel-in-progress: false
@@ -58,7 +61,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24"
 
       - name: Install workflow dependencies
         run: |
@@ -116,6 +119,7 @@ jobs:
             "cloudflare/scripts/export_d1_sql.py"
             "cloudflare/data/release-baseline.json"
             "tools/masstamilan_refresh.py"
+            "tools/validate_stream_smoke.py"
             "server.py"
           )
 
@@ -285,11 +289,19 @@ jobs:
           set -euo pipefail
           workers="$(python - <<'PY'
           import os
-          print(max(4, os.cpu_count() or 4))
+          cpu_count = os.cpu_count() or 4
+          print(max(2, min(6, max(2, cpu_count // 2))))
           PY
           )"
-          batch_size="$(( workers * 4 ))"
-          args=(--workers "${workers}" --batch-size "${batch_size}")
+          batch_size="${workers}"
+          args=(
+            --workers "${workers}"
+            --batch-size "${batch_size}"
+            --page-delay 0.9
+            --album-delay 0.45
+            --retry-count 6
+            --retry-base-delay 6
+          )
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
             args+=(--full)
           fi
@@ -342,7 +354,19 @@ jobs:
       - name: Import release into inactive D1 slot
         run: |
           set -euo pipefail
-          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+          retry() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then
+                return 1
+              fi
+              sleep $(( attempt * 10 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
             --file cloudflare/data/seed.sql \
             --config "${GENERATED_WRANGLER_CONFIG}"
@@ -350,12 +374,24 @@ jobs:
       - name: Validate inactive D1 slot
         run: |
           set -euo pipefail
-          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+          retry() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then
+                return 1
+              fi
+              sleep $(( attempt * 5 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
             --command "SELECT COUNT(*) AS count FROM albums;" \
             --config "${GENERATED_WRANGLER_CONFIG}" \
             --json > /tmp/albums.json
-          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+          retry 3 npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
             --command "SELECT COUNT(*) AS count FROM songs;" \
             --config "${GENERATED_WRANGLER_CONFIG}" \
@@ -387,7 +423,28 @@ jobs:
       - name: Deploy Worker after successful import and validation
         run: |
           set -euo pipefail
-          npx wrangler deploy --config "${GENERATED_WRANGLER_CONFIG}"
+          retry() {
+            local attempts="$1"
+            shift
+            local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then
+                return 1
+              fi
+              sleep $(( attempt * 10 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler deploy --config "${GENERATED_WRANGLER_CONFIG}"
+
+      - name: Smoke test Tamil playback on live main site
+        run: |
+          set -euo pipefail
+          python tools/validate_stream_smoke.py \
+            --db data/sruthi.db \
+            --origin https://sruthi.vklokesh70.workers.dev \
+            --sample-size 3 \
+            --label tamil-main-site
 
       - name: Mark deployed D1 slot as active
         env:

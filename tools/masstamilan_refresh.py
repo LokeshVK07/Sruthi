@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 import cloudscraper
+import requests
 from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -248,9 +249,30 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
             return html
         except Exception as error:  # noqa: BLE001
             last_error = error
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+            retry_after_header = ""
+            if getattr(error, "response", None) is not None:
+                retry_after_header = clean_text(error.response.headers.get("Retry-After"))
             if attempt == retry_count:
                 break
-            sleep_with_jitter(retry_base_delay * attempt, retry_base_delay * 0.5)
+            delay_seconds = retry_base_delay * attempt
+            if status_code == 429:
+                retry_after_seconds = 0
+                if retry_after_header.isdigit():
+                    retry_after_seconds = int(retry_after_header)
+                delay_seconds = max(delay_seconds, retry_after_seconds or (retry_base_delay * (attempt + 2) * 4))
+                print(
+                    f"Rate limited while fetching {absolute}; retrying in {delay_seconds:.1f}s "
+                    f"(attempt {attempt}/{retry_count})",
+                    file=sys.stderr,
+                )
+            elif isinstance(error, requests.HTTPError):
+                print(
+                    f"Fetch failed for {absolute} with HTTP {status_code}; retrying in {delay_seconds:.1f}s "
+                    f"(attempt {attempt}/{retry_count})",
+                    file=sys.stderr,
+                )
+            sleep_with_jitter(delay_seconds, min(5.0, max(0.5, delay_seconds * 0.25)))
     raise RuntimeError(f"Failed to fetch {absolute}: {last_error}") from last_error
 
 

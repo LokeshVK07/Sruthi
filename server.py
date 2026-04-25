@@ -336,6 +336,66 @@ def metadata_key(value):
     return re.sub(r"[^a-z0-9]+", " ", clean_text(value).lower()).strip()
 
 
+def extract_artwork_candidates_from_html(html, base_url=SITE_ORIGIN):
+    if not html:
+        return []
+    patterns = [
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+        r'"image"\s*:\s*"([^"]+)"',
+        r'(?:src|href)=["\']([^"\']*/uploads/album/[^"\']+\.(?:jpg|jpeg|png|webp))["\']',
+    ]
+    candidates = []
+    for pattern in patterns:
+        for match in re.finditer(pattern, html, re.IGNORECASE):
+            candidate = absolute_url(unescape(clean_text(match.group(1))), base_url)
+            if not candidate:
+                continue
+            if "/cdn-cgi/" in candidate or "challenges.cloudflare.com" in candidate:
+                continue
+            candidates.append(candidate)
+    return list(dict.fromkeys(candidates))
+
+
+def fetch_page_artwork_candidates(song):
+    if not song:
+        return []
+    candidates = []
+    page_urls = [
+        absolute_url(song.get("albumUrl")),
+        absolute_url(song.get("sourceUrl")),
+        absolute_url(song.get("songPageUrl")),
+    ]
+    seen = set()
+    for page_url in page_urls:
+        page_url = clean_text(page_url)
+        if not page_url or page_url in seen:
+            continue
+        seen.add(page_url)
+        request = Request(
+            page_url,
+            headers={
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": page_url,
+                "Origin": origin_from_url(page_url),
+                "User-Agent": UPSTREAM_USER_AGENT,
+            },
+        )
+        try:
+            with urlopen(request, timeout=UPSTREAM_PAGE_TIMEOUT_SECONDS) as response:
+                html = response.read().decode("utf-8", "ignore")
+        except (HTTPError, URLError, TimeoutError, ValueError):
+            continue
+        extracted = extract_artwork_candidates_from_html(html, page_url)
+        if extracted:
+            candidates.extend(extracted)
+            break
+    return list(dict.fromkeys(candidates))
+
+
 def upgrade_itunes_artwork_url(url):
     text = clean_text(url)
     if not text:
@@ -2537,6 +2597,7 @@ class CatalogHandler(SimpleHTTPRequestHandler):
         candidates = []
         if song:
             candidates.append(absolute_url(song.get("imageUrl")))
+            candidates.extend(fetch_page_artwork_candidates(song))
         fallback_candidate = fetch_itunes_artwork_candidate(song or {})
         if fallback_candidate:
             candidates.append(fallback_candidate)
