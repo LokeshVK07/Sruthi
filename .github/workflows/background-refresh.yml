@@ -290,17 +290,17 @@ jobs:
           workers="$(python - <<'PY'
           import os
           cpu_count = os.cpu_count() or 4
-          print(max(2, min(6, max(2, cpu_count // 2))))
+          print(max(4, min(12, cpu_count)))
           PY
           )"
-          batch_size="${workers}"
+          batch_size="$(( workers * 3 ))"
           args=(
             --workers "${workers}"
             --batch-size "${batch_size}"
-            --page-delay 0.9
-            --album-delay 0.45
-            --retry-count 6
-            --retry-base-delay 6
+            --page-delay 0.35
+            --album-delay 0.12
+            --retry-count 5
+            --retry-base-delay 2
           )
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
             args+=(--full)
