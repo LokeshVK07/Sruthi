@@ -30,7 +30,7 @@ jobs:
   refresh-and-deploy:
     name: Refresh and Deploy Tamil
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       GH_VARIABLES_TOKEN: ${{ secrets.GH_VARIABLES_TOKEN }}
