@@ -2159,19 +2159,24 @@ function extractBitrateLink(downloadLinks, bitrate) {
 async function fetchText(target) {
   if (!target) return "";
   const referer = absoluteUrl(target) || originFromUrl(target);
-  const response = await fetch(target, {
-    headers: {
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-      Referer: referer,
-      Origin: originFromUrl(referer),
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    },
-    redirect: "follow",
-  });
-  if (!response.ok) return "";
-  return response.text();
+  try {
+    const response = await fetch(target, {
+      signal: AbortSignal.timeout(8000),
+      headers: {
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        Referer: referer,
+        Origin: originFromUrl(referer),
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      },
+      redirect: "follow",
+    });
+    if (!response.ok) return "";
+    return response.text();
+  } catch {
+    return "";
+  }
 }
 
 function extractAlbumTracks(html) {

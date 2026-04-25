@@ -2582,6 +2582,7 @@ function bindEvents() {
     scheduleMediaSessionPosition();
     scheduleNextTrackPrefetch(); // pre-load next song before this one ends
   });
+  const streamRetry = { songId: null, count: 0, timerId: null };
   nodes.audioPlayer.addEventListener("error", () => {
     const song = selectedSong();
     if (song && state.playbackCandidates.length > 1) {
@@ -2592,8 +2593,28 @@ function bindEvents() {
       void playCurrentSong();
       return;
     }
+    if (!song) { renderTransportLabels(); setPlaybackStatus(""); return; }
+    // Reset retry counter when switching songs
+    if (streamRetry.songId !== song.id) {
+      window.clearTimeout(streamRetry.timerId);
+      streamRetry.songId = song.id;
+      streamRetry.count = 0;
+    }
+    if (streamRetry.count < 2) {
+      streamRetry.count += 1;
+      setPlaybackStatus("Loading…");
+      streamRetry.timerId = window.setTimeout(() => {
+        if (selectedSong()?.id !== song.id) return;
+        state.playbackCandidates = playbackCandidatesForSong(song);
+        nodes.audioPlayer.src = state.playbackCandidates[0] || "";
+        nodes.audioPlayer.load();
+        void playCurrentSong({ waitForReady: false });
+      }, 5000);
+      return;
+    }
     renderTransportLabels();
     setPlaybackStatus("");
+    showToast("Song unavailable. Try again later.");
   });
 
   nodes.audioPlayer.addEventListener("ended", async () => {

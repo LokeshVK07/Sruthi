@@ -724,7 +724,7 @@ def main():
     listing_album_seeds, total_pages = build_album_seeds(session, args, processed_urls)
     movie_index_album_seeds = build_movie_index_album_seeds(session, args, processed_urls)
     album_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
-    remaining = album_seeds if args.full else [album for album in album_seeds if album["url"] not in processed_urls]
+    remaining = album_seeds
 
     print(
         json.dumps(
