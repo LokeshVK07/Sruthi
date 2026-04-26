@@ -116,7 +116,6 @@ jobs:
             "cloudflare/public/styles.css"
             "cloudflare/scripts/render_wrangler_config.py"
             "cloudflare/scripts/prepare_release.py"
-            "cloudflare/scripts/bootstrap_local_db_from_d1.py"
             "cloudflare/scripts/export_d1_sql.py"
             "cloudflare/data/release-baseline.json"
             "tools/masstamilan_refresh.py"
@@ -167,7 +166,7 @@ jobs:
           echo "TARGET_DB_NAME=$db_name" >> "$GITHUB_ENV"
           echo "TARGET_SLOT=$target" >> "$GITHUB_ENV"
 
-      - name: Resolve active Tamil D1 slot for incremental bootstrap
+      - name: Resolve active Tamil D1 slot for playlist bootstrap
         run: |
           set -euo pipefail
           active="${SRUTHI_ACTIVE_D1_SLOT:-A}"
@@ -303,44 +302,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p data
-          python cloudflare/scripts/bootstrap_local_db_from_d1.py \
-            --db data/sruthi.db \
-            --config "${GENERATED_WRANGLER_CONFIG}" \
-            --database "${ACTIVE_DB_NAME}"
-
-          npx wrangler d1 execute "${ACTIVE_DB_NAME}" \
-            --remote \
-            --command "SELECT url FROM albums WHERE url IS NOT NULL ORDER BY url;" \
-            --config "${GENERATED_WRANGLER_CONFIG}" \
-            --json > /tmp/active-albums.json
-
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          payload = json.loads(Path("/tmp/active-albums.json").read_text())
-          urls = set()
-          stack = [payload]
-          while stack:
-            item = stack.pop()
-            if isinstance(item, dict):
-              if "url" in item and item["url"]:
-                urls.add(str(item["url"]).strip())
-              stack.extend(item.values())
-            elif isinstance(item, list):
-              stack.extend(item)
-          Path("data/known-albums.txt").write_text("\n".join(sorted(urls)) + ("\n" if urls else ""), encoding="utf-8")
-          print({"knownAlbums": len(urls)})
-          PY
-
           args=(
-            --workers 3
-            --batch-size 9
-            --page-delay 1.2
-            --album-delay 1.5
+            --page-delay 0.35
+            --album-delay 0.15
             --retry-count 5
             --retry-base-delay 3
-            --known-urls-file data/known-albums.txt
           )
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
             args+=(--full)
@@ -358,6 +324,93 @@ jobs:
             echo "::error::data/sruthi.db exists but is empty."
             exit 1
           fi
+
+      - name: Preserve user playlists from active Tamil D1
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import sqlite3
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          config_path = os.environ["GENERATED_WRANGLER_CONFIG"]
+          active_db_name = os.environ["ACTIVE_DB_NAME"]
+          db_path = Path("data/sruthi.db")
+
+          if not db_path.exists():
+            print("data/sruthi.db not found — aborting playlist bootstrap.", file=sys.stderr)
+            sys.exit(1)
+
+          def run_wrangler(command):
+            result = subprocess.run(
+              ["npx", "wrangler", "d1", "execute", active_db_name,
+               "--remote", "--command", command,
+               "--config", config_path, "--json"],
+              text=True, capture_output=True, check=False,
+            )
+            if result.returncode != 0:
+              raise RuntimeError(result.stderr or result.stdout)
+            return json.loads(result.stdout)
+
+          def extract_rows(payload):
+            rows = []
+            stack = [payload]
+            while stack:
+              item = stack.pop()
+              if isinstance(item, dict):
+                results = item.get("results")
+                if isinstance(results, list):
+                  for row in results:
+                    if isinstance(row, dict):
+                      rows.append(row)
+                stack.extend(item.values())
+              elif isinstance(item, list):
+                stack.extend(item)
+            return rows
+
+          check = run_wrangler("SELECT name FROM sqlite_master WHERE type='table' AND name='playlists';")
+          if not extract_rows(check):
+            print("No playlists table in active D1 — skipping.")
+            sys.exit(0)
+
+          playlists = extract_rows(run_wrangler(
+            "SELECT id, name, slug, description, category, cover_url, tags, is_featured, created_at, updated_at "
+            "FROM playlists ORDER BY id;"
+          ))
+          playlist_items = extract_rows(run_wrangler(
+            "SELECT id, playlist_id, song_id, position, created_at "
+            "FROM playlist_items ORDER BY playlist_id, position, song_id;"
+          ))
+
+          if not playlists:
+            print("No playlists in active D1.")
+            sys.exit(0)
+
+          with sqlite3.connect(str(db_path)) as conn:
+            for row in playlists:
+              conn.execute(
+                "INSERT OR REPLACE INTO playlists "
+                "(id, name, slug, description, category, cover_url, tags, is_featured, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (row.get("id"), row.get("name"), row.get("slug"), row.get("description"),
+                 row.get("category"), row.get("cover_url"), row.get("tags"),
+                 row.get("is_featured"), row.get("created_at"), row.get("updated_at"))
+              )
+            for row in playlist_items:
+              conn.execute(
+                "INSERT OR REPLACE INTO playlist_items "
+                "(id, playlist_id, song_id, position, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (row.get("id"), row.get("playlist_id"), row.get("song_id"),
+                 row.get("position"), row.get("created_at"))
+              )
+            conn.commit()
+
+          print(json.dumps({"playlistsPreserved": len(playlists), "itemsPreserved": len(playlist_items)}))
+          PY
 
       - name: Validate catalog and build release seed
         run: |

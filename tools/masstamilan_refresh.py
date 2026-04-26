@@ -62,7 +62,6 @@ def parse_args():
     parser.add_argument("--movie-index-stop-after-known-pages", type=int, default=120)
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--print-summary-only", action="store_true")
-    parser.add_argument("--known-urls-file", default="", help="Optional newline-delimited album URL file used for incremental stopping")
     return parser.parse_args()
 
 
@@ -553,50 +552,6 @@ def parse_album_page(html, album_seed):
     }
 
 
-def load_recently_refreshed_urls_from_db(db_path, max_age_hours=2.5):
-    """Return album URLs whose songs were refreshed within the last max_age_hours.
-
-    Used as the 'skip' set: albums NOT in this set are considered stale and
-    will show as 'new' in the crawl output and be included in the refresh batch.
-    """
-    import sqlite3
-    from datetime import datetime, timezone, timedelta
-
-    db = Path(clean_text(str(db_path)))
-    if not db.exists():
-        return set()
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).strftime("%Y-%m-%dT%H:%M:%S")
-    try:
-        with sqlite3.connect(str(db)) as conn:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT album_url
-                FROM songs
-                WHERE album_url IS NOT NULL AND album_url != ''
-                  AND COALESCE(last_refreshed_at, updated_at, '') >= ?
-                """,
-                (cutoff,),
-            ).fetchall()
-            return {row[0] for row in rows if row[0]}
-    except Exception:
-        return set()
-
-
-def load_processed_urls(known_urls_file=""):
-    processed = set()
-    known_file = Path(clean_text(known_urls_file)) if clean_text(known_urls_file) else None
-    if known_file and known_file.exists():
-        processed.update(
-            to_absolute(line)
-            for line in known_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-            if clean_text(line)
-        )
-        processed = {item for item in processed if item}
-
-    server.ensure_db()
-    processed.update(server.load_processed_urls())
-    return processed
-
 
 def build_album_seeds(session, args, processed_urls):
     page = max(1, args.start_page)
@@ -750,32 +705,9 @@ def main():
 
     session = make_session()
 
-    # all_known_urls: every album URL ever stored in our DB.
-    # Used to catch stale albums that the crawl misses (early-stop).
-    all_known_urls = load_processed_urls(args.known_urls_file)
-
-    # skip_set: albums whose audio URLs are still fresh (< 2.5h old).
-    # Passed to the crawl as the "already processed" set so that albums
-    # needing a refresh show up as "new" in the listing output — matching
-    # the desired "10 albums, 10 new" display on every page.
-    # In --full mode the skip_set is empty, forcing a complete re-fetch.
-    skip_set = set() if args.full else load_recently_refreshed_urls_from_db(server.DB_PATH, max_age_hours=2.5)
-
-    listing_album_seeds, total_pages = build_album_seeds(session, args, skip_set)
-    movie_index_album_seeds = build_movie_index_album_seeds(session, args, skip_set)
+    listing_album_seeds, total_pages = build_album_seeds(session, args, set())
+    movie_index_album_seeds = build_movie_index_album_seeds(session, args, set())
     album_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
-
-    # Include known-stale albums that the early-stop crawl didn't reach.
-    seed_url_set = {a["url"] for a in album_seeds}
-    extra_seeds = [
-        {"url": url, "title": ""}
-        for url in all_known_urls - skip_set
-        if url not in seed_url_set
-    ]
-    all_seeds = unique_by(album_seeds + extra_seeds, lambda item: item["url"])
-
-    # remaining: every album not in skip_set (i.e. stale or brand-new)
-    remaining = [a for a in all_seeds if a["url"] not in skip_set]
 
     print(
         json.dumps(
@@ -786,20 +718,18 @@ def main():
                 "listingDiscoveredAlbums": len(listing_album_seeds),
                 "movieIndexDiscoveredAlbums": len(movie_index_album_seeds),
                 "discoveredAlbums": len(album_seeds),
-                "knownAlbums": len(all_known_urls),
-                "recentlyRefreshed": len(skip_set),
-                "albumsToRefresh": len(remaining),
+                "albumsToRefresh": len(album_seeds),
                 "fullRefresh": bool(args.full),
             },
             indent=2,
         )
     )
 
-    if not remaining:
+    if not album_seeds:
         server.write_runtime_catalog_files_from_db()
         return 0
 
-    updated, failed = refresh_albums(session, remaining, args)
+    updated, failed = refresh_albums(session, album_seeds, args)
     payload = server.write_runtime_catalog_files_from_db()
     summary = {
         "updatedAlbums": updated,
