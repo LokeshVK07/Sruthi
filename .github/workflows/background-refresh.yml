@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       full_refresh:
-        description: Force a full re-fetch of every album and include the movie index crawl
+        description: Full refresh is always enabled for this workflow
         required: false
-        default: false
+        default: true
         type: boolean
   schedule:
     - cron: "17 */6 * * *"
@@ -134,10 +134,7 @@ jobs:
       - name: Resolve run mode
         run: |
           set -euo pipefail
-          full_refresh="false"
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${{ inputs.full_refresh }}" == "true" ]]; then
-            full_refresh="true"
-          fi
+          full_refresh="true"
           echo "SRUTHI_FULL_REFRESH=${full_refresh}" >> "$GITHUB_ENV"
 
       - name: Verify Cloudflare token and account access
@@ -308,17 +305,21 @@ jobs:
             --config "${GENERATED_WRANGLER_CONFIG}" \
             --database "${ACTIVE_DB_NAME}"
 
+          workers="$(python - <<'PY'
+          import os
+          print(max(4, os.cpu_count() or 4))
+          PY
+          )"
+          batch_size="$(( workers * 4 ))"
           args=(
+            --workers "${workers}"
+            --batch-size "${batch_size}"
             --page-delay 0.35
             --album-delay 0.12
             --retry-count 5
             --retry-base-delay 2
+            --full
           )
-          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
-            args+=(--full)
-          else
-            args+=(--skip-movie-index)
-          fi
           python tools/masstamilan_refresh.py "${args[@]}"
 
       - name: Validate refreshed local catalog files
