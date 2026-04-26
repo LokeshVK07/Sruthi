@@ -62,6 +62,7 @@ def parse_args():
     parser.add_argument("--movie-index-stop-after-known-pages", type=int, default=120)
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--print-summary-only", action="store_true")
+    parser.add_argument("--known-urls-file", default="", help="Optional newline-delimited album URL file used for incremental stopping")
     return parser.parse_args()
 
 
@@ -552,6 +553,22 @@ def parse_album_page(html, album_seed):
     }
 
 
+def load_processed_urls(known_urls_file=""):
+    processed = set()
+    known_file = Path(clean_text(known_urls_file)) if clean_text(known_urls_file) else None
+    if known_file and known_file.exists():
+        processed.update(
+            to_absolute(line)
+            for line in known_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+            if clean_text(line)
+        )
+        processed = {item for item in processed if item}
+
+    server.ensure_db()
+    processed.update(server.load_processed_urls())
+    return processed
+
+
 
 def build_album_seeds(session, args, processed_urls):
     page = max(1, args.start_page)
@@ -704,10 +721,12 @@ def main():
         return 0
 
     session = make_session()
+    processed_urls = load_processed_urls(args.known_urls_file)
 
-    listing_album_seeds, total_pages = build_album_seeds(session, args, set())
-    movie_index_album_seeds = build_movie_index_album_seeds(session, args, set())
+    listing_album_seeds, total_pages = build_album_seeds(session, args, processed_urls)
+    movie_index_album_seeds = build_movie_index_album_seeds(session, args, processed_urls)
     album_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
+    remaining = album_seeds if args.full else [album for album in album_seeds if album["url"] not in processed_urls]
 
     print(
         json.dumps(
@@ -718,18 +737,19 @@ def main():
                 "listingDiscoveredAlbums": len(listing_album_seeds),
                 "movieIndexDiscoveredAlbums": len(movie_index_album_seeds),
                 "discoveredAlbums": len(album_seeds),
-                "albumsToRefresh": len(album_seeds),
+                "knownAlbums": len(processed_urls),
+                "albumsToRefresh": len(remaining),
                 "fullRefresh": bool(args.full),
             },
             indent=2,
         )
     )
 
-    if not album_seeds:
+    if not remaining:
         server.write_runtime_catalog_files_from_db()
         return 0
 
-    updated, failed = refresh_albums(session, album_seeds, args)
+    updated, failed = refresh_albums(session, remaining, args)
     payload = server.write_runtime_catalog_files_from_db()
     summary = {
         "updatedAlbums": updated,

@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       full_refresh:
-        description: Force a full re-fetch of every album (ignores recency cache)
+        description: Force a full re-fetch of every album and include the movie index crawl
         required: false
         default: false
         type: boolean
   schedule:
-    - cron: "17 */3 * * *"
+    - cron: "17 */6 * * *"
 
 permissions:
   contents: read
@@ -114,6 +114,7 @@ jobs:
             "cloudflare/public/index.html"
             "cloudflare/public/app.js"
             "cloudflare/public/styles.css"
+            "cloudflare/scripts/bootstrap_local_db_from_d1.py"
             "cloudflare/scripts/render_wrangler_config.py"
             "cloudflare/scripts/prepare_release.py"
             "cloudflare/scripts/export_d1_sql.py"
@@ -302,14 +303,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p data
+          python cloudflare/scripts/bootstrap_local_db_from_d1.py \
+            --db data/sruthi.db \
+            --config "${GENERATED_WRANGLER_CONFIG}" \
+            --database "${ACTIVE_DB_NAME}"
+
           args=(
-            --page-delay 1.0
-            --album-delay 0.8
+            --page-delay 0.35
+            --album-delay 0.12
             --retry-count 5
-            --retry-base-delay 3
+            --retry-base-delay 2
           )
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
             args+=(--full)
+          else
+            args+=(--skip-movie-index)
           fi
           python tools/masstamilan_refresh.py "${args[@]}"
 
@@ -536,7 +544,7 @@ jobs:
           python tools/validate_stream_smoke.py \
             --db data/sruthi.db \
             --origin https://sruthi.vklokesh70.workers.dev \
-            --sample-size 3 \
+            --sample-size 5 \
             --label tamil-main-site
 
       - name: Mark deployed D1 slot as active
