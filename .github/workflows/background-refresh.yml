@@ -303,7 +303,8 @@ jobs:
           set -euo pipefail
           mkdir -p data
           args=(
-            --page-delay 0.35
+            --skip-movie-index
+            --page-delay 0.6
             --album-delay 0.15
             --retry-count 5
             --retry-base-delay 3
