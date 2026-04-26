@@ -52,7 +52,7 @@ async function fetchTeluguResponse(env, path, init = {}) {
   if (!base) {
     throw new Error("Telugu catalog is unavailable.");
   }
-  return fetch(`${base}${path}`, init);
+  return fetch(`${base}${path}`, { signal: AbortSignal.timeout(10000), ...init });
 }
 
 function decorateTeluguSong(song) {
@@ -411,7 +411,8 @@ async function proxyTeluguJson(env, path, init = {}) {
 }
 
 async function proxyTeluguStream(env, request, rawId) {
-  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !rawId) return json({ error: "Song not found." }, 404);
+  if (!rawId) return json({ error: "Song not found." }, 404);
+  if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) return json({ error: "Telugu stream unavailable." }, 503);
   const headers = new Headers();
   const range = request.headers.get("Range");
   if (range) headers.set("Range", range);
@@ -1134,6 +1135,8 @@ async function tryAudioCandidates(row, request, isTelugu = false) {
   const range = request.headers.get("Range");
   const defaultBase = isTelugu ? TELUGU_SITE_ORIGIN : SITE_ORIGIN;
   const baseUrl = cleanText(row.album_url || row.song_page_url || row.source_url || defaultBase);
+  const referer = absoluteUrl(row.album_url || baseUrl, defaultBase);
+  const seen = new Set();
   const candidates = [
     row.audio_128_url,
     row.audio_320_url,
@@ -1141,12 +1144,10 @@ async function tryAudioCandidates(row, request, isTelugu = false) {
     row.remote_audio_128_url,
     row.remote_audio_320_url,
   ].filter(Boolean);
-  
   for (const candidate of candidates) {
     const target = absoluteUrl(candidate, baseUrl);
-    if (!target) continue;
-    // Ensure the Referer is absolute
-    const referer = absoluteUrl(row.album_url || baseUrl, defaultBase);
+    if (!target || seen.has(target)) continue;
+    seen.add(target);
     const upstream = await fetchAudio(target, referer, range);
     if (upstream) return upstream;
   }
@@ -1165,11 +1166,23 @@ async function fetchAudio(target, albumUrl, rangeHeader) {
   });
   if (rangeHeader) headers.set("Range", rangeHeader);
 
-  const response = await fetch(target, {
-    method: "GET",
-    headers,
-    redirect: "follow",
-  });
+  // Connect-only timeout: abort if the CDN doesn't respond within 10s.
+  // Cleared immediately after headers arrive so the stream is never interrupted.
+  const controller = new AbortController();
+  const connectTimeout = setTimeout(() => controller.abort(), 10000);
+  let response;
+  try {
+    response = await fetch(target, {
+      method: "GET",
+      headers,
+      redirect: "follow",
+      signal: controller.signal,
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(connectTimeout);
+  }
 
   const contentType = (response.headers.get("content-type") || "").toLowerCase();
   if (!response.ok) return null;

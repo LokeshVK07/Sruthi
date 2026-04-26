@@ -1172,7 +1172,7 @@ function replaceOptions(selectNode, defaultLabel, values) {
 }
 
 async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
+  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15000) });
   if (!response.ok) throw new Error(`Request failed: ${response.status}`);
   return response.json();
 }
@@ -1622,7 +1622,7 @@ function waitForPlayableAudio() {
     };
     const onReady = () => finish();
     const onDone = () => finish();
-    const timeoutId = window.setTimeout(finish, 2200);
+    const timeoutId = window.setTimeout(finish, 5000);
     nodes.audioPlayer.addEventListener("canplay", onReady, { once: true });
     nodes.audioPlayer.addEventListener("loadeddata", onReady, { once: true });
     nodes.audioPlayer.addEventListener("error", onDone, { once: true });
@@ -2600,7 +2600,7 @@ function bindEvents() {
       streamRetry.songId = song.id;
       streamRetry.count = 0;
     }
-    if (streamRetry.count < 2) {
+    if (streamRetry.count < 3) {
       streamRetry.count += 1;
       setPlaybackStatus("Loading…");
       streamRetry.timerId = window.setTimeout(() => {
