@@ -7,6 +7,7 @@ import random
 import re
 import sys
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List
@@ -33,6 +34,10 @@ CHALLENGE_MARKERS = (
     "checking your browser",
     "enable javascript and cookies to continue",
 )
+
+REQUEST_GATE_LOCK = threading.Lock()
+REQUEST_GATE_NEXT_ALLOWED_AT = 0.0
+CONSECUTIVE_RATE_LIMITS = 0
 
 
 def default_listing_path(origin):
@@ -74,6 +79,31 @@ def sleep_with_jitter(base_seconds, jitter_seconds=0.25):
     if base_seconds <= 0:
         return
     time.sleep(base_seconds + random.random() * max(jitter_seconds, 0))
+
+
+def wait_for_request_window():
+    while True:
+        with REQUEST_GATE_LOCK:
+            delay_seconds = REQUEST_GATE_NEXT_ALLOWED_AT - time.time()
+        if delay_seconds <= 0:
+            return
+        time.sleep(min(delay_seconds, 5.0))
+
+
+def note_successful_request():
+    global CONSECUTIVE_RATE_LIMITS
+    with REQUEST_GATE_LOCK:
+        CONSECUTIVE_RATE_LIMITS = 0
+
+
+def note_rate_limit(base_delay_seconds):
+    global REQUEST_GATE_NEXT_ALLOWED_AT, CONSECUTIVE_RATE_LIMITS
+    with REQUEST_GATE_LOCK:
+        CONSECUTIVE_RATE_LIMITS += 1
+        adaptive_delay = base_delay_seconds * max(1, min(CONSECUTIVE_RATE_LIMITS, 6))
+        cooldown_until = time.time() + adaptive_delay + random.uniform(0.2, 1.2)
+        REQUEST_GATE_NEXT_ALLOWED_AT = max(REQUEST_GATE_NEXT_ALLOWED_AT, cooldown_until)
+        return CONSECUTIVE_RATE_LIMITS, max(0.0, REQUEST_GATE_NEXT_ALLOWED_AT - time.time())
 
 
 def is_challenge_page(html):
@@ -228,6 +258,7 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
     absolute = to_absolute(url)
     for attempt in range(1, retry_count + 1):
         try:
+            wait_for_request_window()
             response = session.get(absolute, timeout=server.UPSTREAM_PAGE_TIMEOUT_SECONDS)
             response.raise_for_status()
             html = response.text
@@ -247,6 +278,7 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
                     html = fallback_response.read().decode("utf-8", errors="ignore")
                 if is_challenge_page(html):
                     raise RuntimeError(f"Challenge page detected for {absolute}")
+            note_successful_request()
             return html
         except Exception as error:  # noqa: BLE001
             last_error = error
@@ -262,9 +294,10 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
                 if retry_after_header.isdigit():
                     retry_after_seconds = int(retry_after_header)
                 delay_seconds = max(delay_seconds, retry_after_seconds or (retry_base_delay * (attempt + 2) * 4))
+                consecutive_rate_limits, gate_delay = note_rate_limit(delay_seconds)
                 print(
                     f"Rate limited while fetching {absolute}; retrying in {delay_seconds:.1f}s "
-                    f"(attempt {attempt}/{retry_count})",
+                    f"(attempt {attempt}/{retry_count}, consecutive 429s: {consecutive_rate_limits}, shared cooldown: {gate_delay:.1f}s)",
                     file=sys.stderr,
                 )
             elif isinstance(error, requests.HTTPError):
@@ -668,6 +701,7 @@ def build_movie_index_album_seeds(session, args, processed_urls):
 def refresh_albums(session, albums, args):
     updated = 0
     failed = []
+    worker_count = max(1, min(args.workers, 4))
 
     def worker(album):
         sleep_with_jitter(args.album_delay, 0.2)
@@ -678,7 +712,7 @@ def refresh_albums(session, albums, args):
         server.upsert_album_into_db(parsed)
         return parsed["title"], len(parsed["tracks"])
 
-    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {executor.submit(worker, album): album for album in albums}
         for future in as_completed(futures):
             album = futures[future]
