@@ -1138,21 +1138,33 @@ async function handleStream(songId, request, env, ctx) {
 async function tryAudioCandidates(row, request, isTelugu = false) {
   const range = request.headers.get("Range");
   const defaultBase = isTelugu ? TELUGU_SITE_ORIGIN : SITE_ORIGIN;
-  const baseUrl = cleanText(row.song_page_url || row.album_url || row.source_url || defaultBase);
+  const baseUrl = cleanText(row.album_url || row.song_page_url || row.source_url || defaultBase);
+  // album_url first — it's the most reliable referer for MassTamilan's CDN
   const referers = unique([
-    absoluteUrl(row.song_page_url, defaultBase),
     absoluteUrl(row.album_url, defaultBase),
+    absoluteUrl(row.song_page_url, defaultBase),
     absoluteUrl(row.source_url, defaultBase),
     absoluteUrl(baseUrl, defaultBase),
   ].filter(Boolean));
   const seen = new Set();
+  // 320kbps first (audio_url is always 320), then 128 as fallback
   const candidates = [
-    row.audio_128_url,
-    row.audio_320_url,
     row.audio_url,
-    row.remote_audio_128_url,
+    row.audio_320_url,
     row.remote_audio_320_url,
+    row.audio_128_url,
+    row.remote_audio_128_url,
   ].filter(Boolean);
+
+  // Fast path: try the best candidate with the best referer first
+  const fastTarget = absoluteUrl(candidates[0], baseUrl);
+  if (fastTarget) {
+    seen.add(fastTarget);
+    const quick = await fetchAudio(fastTarget, referers[0], range);
+    if (quick) return quick;
+  }
+
+  // Full fallback: try all remaining candidates × all referers
   for (const candidate of candidates) {
     const target = absoluteUrl(candidate, baseUrl);
     if (!target || seen.has(target)) continue;
