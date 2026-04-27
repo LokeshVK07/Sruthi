@@ -173,6 +173,8 @@ def ensure_playlist_tables(connection):
 
 
 def load_playlist_seeds():
+    if not PLAYLIST_SEED_PATH.exists():
+        return []
     return json.loads(PLAYLIST_SEED_PATH.read_text(encoding="utf-8"))
 
 
