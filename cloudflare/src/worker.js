@@ -55,13 +55,17 @@ async function fetchTeluguResponse(env, path, init = {}) {
   return fetch(`${base}${path}`, { signal: AbortSignal.timeout(10000), ...init });
 }
 
-function decorateTeluguSong(song) {
+function decorateTeluguSong(song, env = null) {
   if (!song?.id) return null;
   const prefixedId = prefixTeluguSongId(song.id);
+  const teluguOrigin = cleanText(env ? teluguApiOrigin(env) : "");
+  const audioUrl = teluguOrigin
+    ? `${teluguOrigin}/api/stream/${encodeURIComponent(cleanText(song.id))}`
+    : `/api/stream/${prefixedId}`;
   return {
     ...song,
     id: prefixedId,
-    audioUrl: `/api/stream/${prefixedId}`,
+    audioUrl,
   };
 }
 
@@ -151,7 +155,7 @@ async function fetchTeluguSong(env, songId) {
       `,
     ).bind(rawId).first();
     if (!row) return null;
-    return decorateTeluguSong(rowToSong(row));
+    return decorateTeluguSong(rowToSong(row), env);
   }
 
   if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) {
@@ -162,7 +166,7 @@ async function fetchTeluguSong(env, songId) {
     const response = await fetchTeluguResponse(env, `/api/song?id=${encodeURIComponent(rawId)}`);
     if (!response.ok) return null;
     const payload = await response.json();
-    return decorateTeluguSong(payload);
+    return decorateTeluguSong(payload, env);
   } catch {
     return null;
   }
@@ -376,7 +380,7 @@ async function fetchTeluguSongsBatch(env, ids) {
         WHERE id IN (${placeholders})
         `,
       ).bind(...chunk).all();
-      songs.push(...(result.results || []).map((row) => decorateTeluguSong(rowToSong(row))));
+      songs.push(...(result.results || []).map((row) => decorateTeluguSong(rowToSong(row), env)));
     }
     return songs;
   }
@@ -413,12 +417,8 @@ async function proxyTeluguJson(env, path, init = {}) {
 async function proxyTeluguStream(env, request, rawId) {
   if (!rawId) return json({ error: "Song not found." }, 404);
   if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) return json({ error: "Telugu stream unavailable." }, 503);
-  const headers = new Headers();
-  const range = request.headers.get("Range");
-  if (range) headers.set("Range", range);
   const upstream = await fetchTeluguResponse(env, `/api/stream/${encodeURIComponent(rawId)}`, {
     method: "GET",
-    headers,
     redirect: "follow",
   }).catch(() => null);
   if (!upstream) return json({ error: "Upstream stream unavailable." }, 502);
@@ -1065,6 +1065,9 @@ async function handleStream(songId, request, env, ctx) {
 
   if (isTeluguSongId(songId)) {
     const rawId = rawTeluguSongId(songId);
+    if ((env.TELUGU_SERVICE || teluguApiOrigin(env)) && rawId) {
+      return proxyTeluguStream(env, request, rawId);
+    }
     if (env.TELUGU_DB && rawId) {
       let row = await env.TELUGU_DB.prepare(
         `
@@ -1135,8 +1138,13 @@ async function handleStream(songId, request, env, ctx) {
 async function tryAudioCandidates(row, request, isTelugu = false) {
   const range = request.headers.get("Range");
   const defaultBase = isTelugu ? TELUGU_SITE_ORIGIN : SITE_ORIGIN;
-  const baseUrl = cleanText(row.album_url || row.song_page_url || row.source_url || defaultBase);
-  const referer = absoluteUrl(row.album_url || baseUrl, defaultBase);
+  const baseUrl = cleanText(row.song_page_url || row.album_url || row.source_url || defaultBase);
+  const referers = unique([
+    absoluteUrl(row.song_page_url, defaultBase),
+    absoluteUrl(row.album_url, defaultBase),
+    absoluteUrl(row.source_url, defaultBase),
+    absoluteUrl(baseUrl, defaultBase),
+  ].filter(Boolean));
   const seen = new Set();
   const candidates = [
     row.audio_128_url,
@@ -1149,56 +1157,84 @@ async function tryAudioCandidates(row, request, isTelugu = false) {
     const target = absoluteUrl(candidate, baseUrl);
     if (!target || seen.has(target)) continue;
     seen.add(target);
-    const upstream = await fetchAudio(target, referer, range);
-    if (upstream) return upstream;
+    for (const referer of referers) {
+      const upstream = await fetchAudio(target, referer, range);
+      if (upstream) return upstream;
+    }
   }
   return null;
 }
 
 async function fetchAudio(target, albumUrl, rangeHeader) {
   const referer = cleanText(albumUrl) || SITE_ORIGIN;
-  const headers = new Headers({
-    Accept: "audio/mpeg,audio/*;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    Referer: referer,
-    Origin: originFromUrl(referer, SITE_ORIGIN),
-    "User-Agent":
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  });
-  if (rangeHeader) headers.set("Range", rangeHeader);
+  const retryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
+  const rangeModes = rangeHeader ? [rangeHeader, ""] : [""];
 
-  // Connect-only timeout: abort if the CDN doesn't respond within 10s.
-  // Cleared immediately after headers arrive so the stream is never interrupted.
-  const controller = new AbortController();
-  const connectTimeout = setTimeout(() => controller.abort(), 10000);
-  let response;
-  try {
-    response = await fetch(target, {
-      method: "GET",
-      headers,
-      redirect: "follow",
-      signal: controller.signal,
-    });
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(connectTimeout);
+  for (const requestedRange of rangeModes) {
+    const maxAttempts = requestedRange ? 1 : 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const headers = new Headers({
+        Accept: "audio/mpeg,audio/*;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        Referer: referer,
+        Origin: originFromUrl(referer, SITE_ORIGIN),
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      });
+      if (requestedRange) headers.set("Range", requestedRange);
+
+      const controller = new AbortController();
+      const connectTimeout = setTimeout(() => controller.abort(), 10000);
+      let response;
+      try {
+        response = await fetch(target, {
+          method: "GET",
+          headers,
+          redirect: "follow",
+          signal: controller.signal,
+        });
+      } catch {
+        response = null;
+      } finally {
+        clearTimeout(connectTimeout);
+      }
+
+      if (!response) {
+        if (attempt < maxAttempts) await sleep(300 * attempt);
+        continue;
+      }
+
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (response.ok && !contentType.includes("text/html") && !contentType.includes("text/plain")) {
+        const outHeaders = new Headers(corsHeaders());
+        outHeaders.set("Content-Type", response.headers.get("content-type") || "audio/mpeg");
+        if (response.headers.get("content-length")) outHeaders.set("Content-Length", response.headers.get("content-length"));
+        if (response.headers.get("content-range")) outHeaders.set("Content-Range", response.headers.get("content-range"));
+        outHeaders.set("Accept-Ranges", response.headers.get("accept-ranges") || "bytes");
+        if (!requestedRange) outHeaders.set("Cache-Control", "public, max-age=3600");
+        return new Response(response.body, {
+          status: response.status,
+          headers: outHeaders,
+        });
+      }
+
+      if (!retryableStatuses.has(response.status) && !contentType.includes("text/html")) {
+        break;
+      }
+
+      if (attempt < maxAttempts) {
+        const retryAfter = Math.max(0, toInt(response.headers.get("retry-after"), 0));
+        const waitMs = retryAfter > 0 ? Math.min(retryAfter, 1) * 1000 : 350 * attempt;
+        await sleep(waitMs);
+      }
+    }
   }
 
-  const contentType = (response.headers.get("content-type") || "").toLowerCase();
-  if (!response.ok) return null;
-  if (contentType.includes("text/html") || contentType.includes("text/plain")) return null;
+  return null;
+}
 
-  const outHeaders = new Headers(corsHeaders());
-  outHeaders.set("Content-Type", response.headers.get("content-type") || "audio/mpeg");
-  if (response.headers.get("content-length")) outHeaders.set("Content-Length", response.headers.get("content-length"));
-  if (response.headers.get("content-range")) outHeaders.set("Content-Range", response.headers.get("content-range"));
-  outHeaders.set("Accept-Ranges", response.headers.get("accept-ranges") || "bytes");
-  if (!rangeHeader) outHeaders.set("Cache-Control", "public, max-age=3600");
-  return new Response(response.body, {
-    status: response.status,
-    headers: outHeaders,
-  });
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function tryRefreshSongLink(env, row, dbOverride = null) {
@@ -1823,7 +1859,7 @@ async function loadSongsByIds(env, ids) {
           `,
         ).bind(...chunk).all();
         (result.results || []).forEach(row => {
-          const song = decorateTeluguSong(rowToSong(row));
+          const song = decorateTeluguSong(rowToSong(row), env);
           if (song) byId.set(song.id, song);
         });
       }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import certifi
 import hashlib
 import json
 import os
@@ -301,6 +302,7 @@ def make_session():
             "Upgrade-Insecure-Requests": "1",
         }
     )
+    session.verify = certifi.where()
     return session
 
 

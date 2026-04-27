@@ -264,9 +264,7 @@ jobs:
             --retry-base-delay 3
             --failure-threshold 0.5
           )
-          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
-            args+=(--full)
-          fi
+          args+=(--full)
           python tools/masstamilan_refresh.py "${args[@]}"
       - name: Validate refreshed local catalog files
         run: |
