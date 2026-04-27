@@ -221,10 +221,16 @@ def make_session():
     return session
 
 
-def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
+def _is_rate_limited(error):
+    resp = getattr(error, "response", None)
+    return resp is not None and getattr(resp, "status_code", None) == 429
+
+
+def fetch_html(session, url, retry_count=3, retry_base_delay=1.0, rate_limit_base=30.0):
     last_error = None
     absolute = to_absolute(url)
-    for attempt in range(1, retry_count + 1):
+    max_attempts = max(retry_count, 5)
+    for attempt in range(1, max_attempts + 1):
         try:
             response = session.get(absolute, timeout=server.UPSTREAM_PAGE_TIMEOUT_SECONDS)
             response.raise_for_status()
@@ -248,9 +254,14 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
             return html
         except Exception as error:  # noqa: BLE001
             last_error = error
-            if attempt == retry_count:
+            if attempt == max_attempts:
                 break
-            sleep_with_jitter(retry_base_delay * attempt, retry_base_delay * 0.5)
+            if _is_rate_limited(error):
+                wait = rate_limit_base * attempt
+                print(f"Rate limited on {absolute}; retrying in {wait:.1f}s (attempt {attempt}/{max_attempts})")
+                sleep_with_jitter(wait, min(wait * 0.2, 10))
+            else:
+                sleep_with_jitter(retry_base_delay * attempt, retry_base_delay * 0.5)
     raise RuntimeError(f"Failed to fetch {absolute}: {last_error}") from last_error
 
 
@@ -543,7 +554,11 @@ def build_album_seeds(session, args, processed_urls):
     consecutive_known_pages = 0
 
     while page <= args.max_pages:
-        html = fetch_html(session, LISTING_PATH.format(page=page), args.retry_count, args.retry_base_delay)
+        try:
+            html = fetch_html(session, LISTING_PATH.format(page=page), args.retry_count, args.retry_base_delay)
+        except RuntimeError as exc:
+            print(f"[listing page {page}] failed after all retries, stopping page scan: {exc}", file=sys.stderr)
+            break
         seeds = parse_listing_page(html, page)
         soup = BeautifulSoup(html, "html.parser")
         page_total = parse_total_pages(soup)
@@ -581,7 +596,11 @@ def build_movie_index_album_seeds(session, args, processed_urls):
     if args.skip_movie_index:
         return []
 
-    root_html = fetch_html(session, MOVIE_INDEX_PATH, args.retry_count, args.retry_base_delay)
+    try:
+        root_html = fetch_html(session, MOVIE_INDEX_PATH, args.retry_count, args.retry_base_delay)
+    except RuntimeError as exc:
+        print(f"[movie index] failed to fetch root page, skipping movie index: {exc}", file=sys.stderr)
+        return []
     entry_paths = parse_movie_index_entry_paths(root_html, include_tag_index=args.include_tag_index)
     discovered = []
     seen_album_urls = set()
@@ -597,7 +616,11 @@ def build_movie_index_album_seeds(session, args, processed_urls):
         seen_page_urls.add(page_url)
         page_number += 1
 
-        html = fetch_html(session, page_url, args.retry_count, args.retry_base_delay)
+        try:
+            html = fetch_html(session, page_url, args.retry_count, args.retry_base_delay)
+        except RuntimeError as exc:
+            print(f"[movie index page {page_number}] failed after all retries, stopping: {exc}", file=sys.stderr)
+            break
         seeds = parse_directory_album_seeds(html, page_number=page_number)
         new_on_page = 0
         for seed in seeds:

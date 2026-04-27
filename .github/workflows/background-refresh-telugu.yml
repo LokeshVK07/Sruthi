@@ -249,19 +249,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${SRUTHI_DATA_DIR}" "${SRUTHI_MEDIA_DIR}" "${SRUTHI_CACHE_AUDIO_DIR}"
-          args=(
-            --include-tag-index
-            --workers 1
-            --batch-size 1
-            --page-delay 0.6
-            --album-delay 1.2
-            --retry-count 5
-            --retry-base-delay 5
-          )
-          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
-            args+=(--full)
-          fi
-          python tools/masstelugu_refresh.py "${args[@]}"
+          python tools/masstelugu_refresh.py \
+            --include-tag-index \
+            --workers 1 \
+            --batch-size 1 \
+            --page-delay 0.6 \
+            --album-delay 1.2 \
+            --retry-count 5 \
+            --retry-base-delay 5 \
+            --full
 
       - name: Validate refreshed local Telugu catalog files
         run: |

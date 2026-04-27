@@ -252,11 +252,11 @@ jobs:
           PY
           )"
           batch_size="$(( workers * 4 ))"
-          args=(--workers "${workers}" --batch-size "${batch_size}")
-          if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
-            args+=(--full)
-          fi
-          python tools/masstamilan_refresh.py "${args[@]}"
+          python tools/masstamilan_refresh.py \
+            --workers "${workers}" \
+            --batch-size "${batch_size}" \
+            --retry-count 5 \
+            --full
 
       - name: Validate refreshed local catalog files
         run: |
