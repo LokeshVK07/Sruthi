@@ -255,6 +255,7 @@ jobs:
           python tools/masstamilan_refresh.py \
             --workers "${workers}" \
             --batch-size "${batch_size}" \
+            --page-delay 0.6 \
             --retry-count 5 \
             --full
 

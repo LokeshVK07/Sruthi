@@ -800,6 +800,26 @@ async function handleApi(request, env, url, ctx) {
   return json({ error: "Not found." }, 404);
 }
 
+async function fetchFreshAudioUrl(row) {
+  const albumUrl = cleanText(row.album_url);
+  if (!albumUrl) return null;
+  const html = await fetchText(albumUrl);
+  if (!html || !html.includes("window.albumTracks")) return null;
+  const tracks = extractAlbumTracks(html);
+  if (!tracks.length) return null;
+  const songId = String(cleanText(String(row.id)));
+  const songPageUrl = cleanText(row.song_page_url);
+  const track =
+    tracks.find((t) => String(t.id || "") === songId) ||
+    (songPageUrl && tracks.find((t) => cleanText(t.songPageUrl) === songPageUrl)) ||
+    null;
+  if (!track) return null;
+  const primary = cleanText(track.dl_path);
+  if (!primary) return null;
+  if (primary.includes("/p128_cdn/")) return absoluteUrl(primary.replace("/p128_cdn/", "/p320_cdn/"), albumUrl);
+  return absoluteUrl(primary, albumUrl);
+}
+
 async function handleStream(songId, request, env, ctx) {
   const range = request.headers.get("Range");
   if (!range) {
@@ -819,20 +839,37 @@ async function handleStream(songId, request, env, ctx) {
 
   if (!row) return json({ error: "Song not found." }, 404);
 
-  let response = await tryAudioCandidates(row, request);
-  if (response && !range) {
-    ctx?.waitUntil(caches.default.put(request, response.clone()));
-  }
-  if (response) return response;
+  // Start fetching a fresh signed URL from the album page immediately.
+  // Stored URLs are session-tied to the scraper and always return 403 from the Worker,
+  // so we fetch the album page in parallel so it's ready as soon as stored URLs fail.
+  const freshUrlPromise = fetchFreshAudioUrl(row);
 
+  let response = await tryAudioCandidates(row, request);
+  if (response) {
+    if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
+    return response;
+  }
+
+  // Stored URLs failed — use the fresh URL from the album page fetch running in parallel.
+  const freshUrl = await freshUrlPromise;
+  if (freshUrl) {
+    response = await fetchAudio(freshUrl, cleanText(row.album_url), range);
+    if (response) {
+      if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
+      ctx?.waitUntil(tryRefreshSongLink(env, row));
+      return response;
+    }
+  }
+
+  // Fallback: full DB refresh (covers albums where album_url changed or track id shifted).
   const refreshed = await tryRefreshSongLink(env, row);
   if (refreshed) {
     row = refreshed;
     response = await tryAudioCandidates(row, request);
-    if (response && !range) {
-      ctx?.waitUntil(caches.default.put(request, response.clone()));
+    if (response) {
+      if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
+      return response;
     }
-    if (response) return response;
   }
 
   return json({ error: "Upstream stream unavailable." }, 502);

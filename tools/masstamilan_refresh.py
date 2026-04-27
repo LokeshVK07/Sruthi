@@ -6,6 +6,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -15,6 +16,24 @@ from urllib.request import Request, urlopen
 
 import cloudscraper
 from bs4 import BeautifulSoup
+
+# Global cooldown: when a 429 is seen by any thread, all threads pause until this timestamp.
+_cooldown_lock = threading.Lock()
+_cooldown_until: float = 0.0
+
+
+def _set_cooldown(seconds: float) -> None:
+    global _cooldown_until
+    with _cooldown_lock:
+        _cooldown_until = max(_cooldown_until, time.monotonic() + seconds)
+
+
+def _wait_for_cooldown() -> None:
+    with _cooldown_lock:
+        target = _cooldown_until
+    remaining = target - time.monotonic()
+    if remaining > 0:
+        time.sleep(remaining + random.random() * 2)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -226,11 +245,23 @@ def _is_rate_limited(error):
     return resp is not None and getattr(resp, "status_code", None) == 429
 
 
+def _retry_after_seconds(error, default: float) -> float:
+    resp = getattr(error, "response", None)
+    if resp is None:
+        return default
+    header = (resp.headers or {}).get("Retry-After", "")
+    try:
+        return max(float(header), 5.0)
+    except (TypeError, ValueError):
+        return default
+
+
 def fetch_html(session, url, retry_count=3, retry_base_delay=1.0, rate_limit_base=30.0):
     last_error = None
     absolute = to_absolute(url)
     max_attempts = max(retry_count, 5)
     for attempt in range(1, max_attempts + 1):
+        _wait_for_cooldown()
         try:
             response = session.get(absolute, timeout=server.UPSTREAM_PAGE_TIMEOUT_SECONDS)
             response.raise_for_status()
@@ -257,8 +288,8 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0, rate_limit_bas
             if attempt == max_attempts:
                 break
             if _is_rate_limited(error):
-                wait = rate_limit_base * attempt
-                print(f"Rate limited on {absolute}; retrying in {wait:.1f}s (attempt {attempt}/{max_attempts})")
+                wait = _retry_after_seconds(error, rate_limit_base * attempt)
+                _set_cooldown(wait)
                 sleep_with_jitter(wait, min(wait * 0.2, 10))
             else:
                 sleep_with_jitter(retry_base_delay * attempt, retry_base_delay * 0.5)
