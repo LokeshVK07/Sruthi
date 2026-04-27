@@ -1116,20 +1116,42 @@ async function handleStream(songId, request, env, ctx) {
 
   if (!row) return json({ error: "Song not found." }, 404);
 
-  let response = await tryAudioCandidates(row, request, false);
-  if (response && !range) {
-    ctx?.waitUntil(caches.default.put(request, response.clone()));
-  }
-  if (response) return response;
+  // Start fresh-token fetch in parallel so it's ready if stored token fails
+  const freshUrlPromise = fetchFreshAudioUrl(row);
 
+  let response = await tryAudioCandidates(row, request, false);
+  if (response) {
+    if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
+    return response;
+  }
+
+  // Stored token failed — use fresh URL already being fetched in parallel
+  const freshUrl = await freshUrlPromise;
+  if (freshUrl) {
+    const freshRow = {
+      ...row,
+      audio_url: freshUrl,
+      audio_320_url: freshUrl,
+      audio_128_url: freshUrl.replace("/p320_cdn/", "/p128_cdn/"),
+      remote_audio_320_url: freshUrl,
+      remote_audio_128_url: freshUrl.replace("/p320_cdn/", "/p128_cdn/"),
+    };
+    response = await tryAudioCandidates(freshRow, request, false);
+    if (response) {
+      if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
+      ctx?.waitUntil(tryRefreshSongLink(env, row));
+      return response;
+    }
+  }
+
+  // Last resort: full refresh (writes to D1 for next time)
   const refreshed = await tryRefreshSongLink(env, row);
   if (refreshed) {
-    row = refreshed;
-    response = await tryAudioCandidates(row, request, false);
-    if (response && !range) {
-      ctx?.waitUntil(caches.default.put(request, response.clone()));
+    response = await tryAudioCandidates(refreshed, request, false);
+    if (response) {
+      if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
+      return response;
     }
-    if (response) return response;
   }
 
   return json({ error: "Stream currently unavailable. Please try again later." }, 503);
@@ -1230,6 +1252,10 @@ async function fetchAudio(target, albumUrl, rangeHeader) {
         });
       }
 
+      // 4xx errors (except retryable ones like 429) are permanent — don't retry
+      if (response.status >= 400 && response.status < 500 && !retryableStatuses.has(response.status)) {
+        break;
+      }
       if (!retryableStatuses.has(response.status) && !contentType.includes("text/html")) {
         break;
       }
@@ -1247,6 +1273,24 @@ async function fetchAudio(target, albumUrl, rangeHeader) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchFreshAudioUrl(row) {
+  const albumUrl = cleanText(row.album_url);
+  if (!albumUrl) return null;
+  const html = await fetchText(albumUrl);
+  if (!html || !html.includes("window.albumTracks")) return null;
+  const tracks = extractAlbumTracks(html);
+  if (!tracks.length) return null;
+  const songPageUrl = cleanText(row.song_page_url);
+  const songId = cleanText(row.id);
+  const track =
+    (songPageUrl && tracks.find(t => cleanText(t.songPageUrl) === songPageUrl)) ||
+    tracks.find(t => String(t.id) === songId);
+  if (!track) return null;
+  const dl = cleanText(track.dl_path);
+  if (!dl) return null;
+  return dl.includes("/p320_cdn/") ? dl : dl.includes("/p128_cdn/") ? dl.replace("/p128_cdn/", "/p320_cdn/") : dl;
 }
 
 async function tryRefreshSongLink(env, row, dbOverride = null) {
