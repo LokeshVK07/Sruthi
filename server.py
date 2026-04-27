@@ -15,8 +15,6 @@ from urllib.parse import parse_qs, quote_plus, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from playlist_catalog import ensure_playlist_tables, list_playlists, load_playlist
-
 
 ROOT = Path(__file__).resolve().parent
 ENV_PATH = ROOT / ".env.local"
@@ -38,11 +36,7 @@ RAW_CATALOG_PATH = DATA_DIR / "catalog.json"
 INDEX_PATH = DATA_DIR / "catalog-index.json"
 STATUS_PATH = DATA_DIR / "catalog-status.json"
 DB_PATH = DATA_DIR / "sruthi.db"
-TELUGU_DATA_DIR = resolve_storage_path("SRUTHI_TELUGU_DATA_DIR", Path("data") / "telugu")
-TELUGU_DB_PATH = TELUGU_DATA_DIR / "sruthi.db"
 SITE_ORIGIN = "https://www.masstamilan.dev"
-TELUGU_SITE_ORIGIN = "https://masstelugu.com"
-TELUGU_ID_PREFIX = "telugu:"
 MEDIA_DIR = resolve_storage_path("SRUTHI_MEDIA_DIR", Path("media"))
 CACHE_AUDIO_DIR = resolve_storage_path("SRUTHI_CACHE_AUDIO_DIR", Path(".cache") / "audio")
 UPSTREAM_USER_AGENT = (
@@ -115,61 +109,11 @@ def ensure_data_dir():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def get_sqlite_connection(path):
-    connection = sqlite3.connect(path)
-    connection.row_factory = sqlite3.Row
-    return connection
-
-
 def get_db_connection():
     ensure_data_dir()
-    return get_sqlite_connection(DB_PATH)
-
-
-def telugu_catalog_enabled():
-    try:
-        return TELUGU_DB_PATH.exists() and TELUGU_DB_PATH.resolve() != DB_PATH.resolve()
-    except FileNotFoundError:
-        return TELUGU_DB_PATH.exists()
-
-
-def is_telugu_song_id(song_id):
-    return clean_text(song_id).startswith(TELUGU_ID_PREFIX)
-
-
-def decode_telugu_song_id(song_id):
-    key = clean_text(song_id)
-    if not key.startswith(TELUGU_ID_PREFIX):
-        return key
-    return key[len(TELUGU_ID_PREFIX) :]
-
-
-def encode_telugu_song_id(song_id):
-    key = clean_text(song_id)
-    if not key:
-        return ""
-    if key.startswith(TELUGU_ID_PREFIX):
-        return key
-    return f"{TELUGU_ID_PREFIX}{key}"
-
-
-def get_song_storage(song_id):
-    key = clean_text(song_id)
-    if is_telugu_song_id(key):
-        return {
-            "db_path": TELUGU_DB_PATH,
-            "song_id": decode_telugu_song_id(key),
-            "id_prefix": TELUGU_ID_PREFIX,
-            "use_local_media": False,
-            "source_fallback": TELUGU_SITE_ORIGIN,
-        }
-    return {
-        "db_path": DB_PATH,
-        "song_id": key,
-        "id_prefix": "",
-        "use_local_media": True,
-        "source_fallback": SITE_ORIGIN,
-    }
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
 
 
 def ensure_db():
@@ -194,8 +138,6 @@ def ensure_db():
               lyricists TEXT,
               zip_links_json TEXT NOT NULL DEFAULT '[]',
               track_count INTEGER NOT NULL DEFAULT 0,
-              content_hash TEXT,
-              last_checked_at TEXT,
               updated_at TEXT NOT NULL
             );
 
@@ -241,18 +183,8 @@ def ensure_db():
             CREATE INDEX IF NOT EXISTS idx_songs_movie_title ON songs(movie, title);
             CREATE INDEX IF NOT EXISTS idx_songs_year ON songs(year);
             CREATE INDEX IF NOT EXISTS idx_songs_link_status ON songs(link_status);
-            CREATE INDEX IF NOT EXISTS idx_songs_song_page_url ON songs(song_page_url);
             """
         )
-        for _stmt in [
-            "ALTER TABLE albums ADD COLUMN content_hash TEXT",
-            "ALTER TABLE albums ADD COLUMN last_checked_at TEXT",
-        ]:
-            try:
-                connection.execute(_stmt)
-            except Exception:
-                pass
-        ensure_playlist_tables(connection)
 
 
 def ensure_media_dir():
@@ -341,164 +273,6 @@ def absolute_url(url, base_origin=None):
     if text.startswith("/"):
         return f"{origin}{text}"
     return f"{origin}/{text.lstrip('/')}"
-
-
-def metadata_key(value):
-    return re.sub(r"[^a-z0-9]+", " ", clean_text(value).lower()).strip()
-
-
-def extract_artwork_candidates_from_html(html, base_url=SITE_ORIGIN):
-    if not html:
-        return []
-    patterns = [
-        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
-        r'"image"\s*:\s*"([^"]+)"',
-        r'(?:src|href)=["\']([^"\']*/uploads/album/[^"\']+\.(?:jpg|jpeg|png|webp))["\']',
-    ]
-    candidates = []
-    for pattern in patterns:
-        for match in re.finditer(pattern, html, re.IGNORECASE):
-            candidate = absolute_url(unescape(clean_text(match.group(1))), base_url)
-            if not candidate:
-                continue
-            if "/cdn-cgi/" in candidate or "challenges.cloudflare.com" in candidate:
-                continue
-            candidates.append(candidate)
-    return list(dict.fromkeys(candidates))
-
-
-def fetch_page_artwork_candidates(song):
-    if not song:
-        return []
-    candidates = []
-    page_urls = [
-        absolute_url(song.get("albumUrl")),
-        absolute_url(song.get("sourceUrl")),
-        absolute_url(song.get("songPageUrl")),
-    ]
-    seen = set()
-    for page_url in page_urls:
-        page_url = clean_text(page_url)
-        if not page_url or page_url in seen:
-            continue
-        seen.add(page_url)
-        request = Request(
-            page_url,
-            headers={
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Referer": page_url,
-                "Origin": origin_from_url(page_url),
-                "User-Agent": UPSTREAM_USER_AGENT,
-            },
-        )
-        try:
-            with urlopen(request, timeout=UPSTREAM_PAGE_TIMEOUT_SECONDS) as response:
-                html = response.read().decode("utf-8", "ignore")
-        except (HTTPError, URLError, TimeoutError, ValueError):
-            continue
-        extracted = extract_artwork_candidates_from_html(html, page_url)
-        if extracted:
-            candidates.extend(extracted)
-            break
-    return list(dict.fromkeys(candidates))
-
-
-def upgrade_itunes_artwork_url(url):
-    text = clean_text(url)
-    if not text:
-        return ""
-    upgraded = re.sub(r"/\d+x\d+bb(?:-\d+)?\.(jpg|png)$", r"/1200x1200bb.\1", text)
-    return upgraded or text
-
-
-def score_itunes_result(song, item, language="tamil"):
-    title_key = metadata_key(song.get("title"))
-    movie_key = metadata_key(song.get("movie"))
-    composer_key = metadata_key(song.get("composer"))
-    track_key = metadata_key(item.get("trackName") or item.get("collectionName"))
-    collection_key = metadata_key(item.get("collectionName"))
-    genre_key = metadata_key(item.get("primaryGenreName"))
-    artist_key = metadata_key(item.get("artistName"))
-    score = 0
-    if title_key and track_key == title_key:
-        score += 120
-    elif title_key and title_key and title_key in track_key:
-        score += 70
-    if movie_key and collection_key == movie_key:
-        score += 90
-    elif movie_key and movie_key in collection_key:
-        score += 60
-    if composer_key and composer_key and composer_key in artist_key:
-        score += 25
-    if genre_key == language:
-        score += 20
-    try:
-        if as_int(item.get("trackCount")):
-            score += min(10, as_int(item.get("trackCount")))
-    except Exception:
-        pass
-    return score
-
-
-def fetch_itunes_artwork_candidate(song, language="tamil"):
-    terms = []
-    title = clean_text(song.get("title"))
-    movie = clean_text(song.get("movie"))
-    composer = clean_text(song.get("composer"))
-    lang_label = language.capitalize()
-    if title or movie:
-        terms.append(("song", " ".join(part for part in (title, movie, composer, lang_label) if part)))
-    if movie:
-        terms.append(("album", " ".join(part for part in (movie, composer, lang_label) if part)))
-
-    best_item = None
-    best_score = 0
-    for entity, term in terms:
-        if not term:
-            continue
-        target = (
-            "https://itunes.apple.com/search"
-            f"?term={quote_plus(term)}&entity={quote_plus(entity)}&country=IN&limit=10"
-        )
-        request = Request(
-            target,
-            headers={
-                "Accept": "application/json",
-                "User-Agent": UPSTREAM_USER_AGENT,
-            },
-        )
-        try:
-            with urlopen(request, timeout=UPSTREAM_PAGE_TIMEOUT_SECONDS) as response:
-                payload = json.loads(response.read().decode("utf-8", "ignore"))
-        except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
-            continue
-
-        for item in payload.get("results", []) or []:
-            artwork = upgrade_itunes_artwork_url(item.get("artworkUrl100") or item.get("artworkUrl60"))
-            if not artwork:
-                continue
-            score = score_itunes_result(song, item, language)
-            if score > best_score:
-                best_score = score
-                best_item = artwork
-
-    return best_item if best_score >= 80 else ""
-
-
-def persist_song_artwork(song_id, image_url):
-    storage = get_song_storage(song_id)
-    db_path = storage.get("db_path")
-    if not db_path or not clean_text(image_url):
-        return
-    with get_sqlite_connection(db_path) as connection:
-        connection.execute(
-            "UPDATE songs SET image_url = ?, updated_at = ? WHERE id = ?",
-            (clean_text(image_url), utc_now(), storage.get("song_id")),
-        )
 
 
 def infer_bitrate_url(url, bitrate):
@@ -592,14 +366,14 @@ def parse_album_title_from_html(html):
     return short_text(strip_html_tags(unescape(match.group(1))) if match else "", 180)
 
 
-def extract_album_links_from_html(html, base_origin=None):
+def extract_album_links_from_html(html):
     if not html:
         return []
     matches = re.findall(r'href=["\']([^"\']*?-songs(?:\?[^"\']*)?)["\']', html, re.IGNORECASE)
     links = []
     seen = set()
     for match in matches:
-        url = absolute_url(unescape(match), base_origin or SITE_ORIGIN)
+        url = absolute_url(unescape(match))
         if not url or url in seen:
             continue
         seen.add(url)
@@ -1062,49 +836,6 @@ def build_song_from_track(album, track):
     }
 
 
-def song_identity_key(value):
-    return re.sub(r"[^a-z0-9]+", " ", clean_text(value).lower()).strip()
-
-
-def build_existing_album_song_maps(connection, album_url):
-    rows = connection.execute(
-        """
-        SELECT id, title, song_page_url, source_url
-        FROM songs
-        WHERE album_url = ?
-        """,
-        (album_url,),
-    ).fetchall()
-    existing_by_page_url = {}
-    existing_by_title_key = {}
-    for row in rows:
-        for candidate in (clean_text(row["song_page_url"]), clean_text(row["source_url"])):
-            if not candidate or candidate == album_url:
-                continue
-            if candidate and candidate not in existing_by_page_url:
-                existing_by_page_url[candidate] = row
-        title_key = song_identity_key(row["title"])
-        if not title_key:
-            continue
-        existing_by_title_key.setdefault(title_key, []).append(row)
-    return rows, existing_by_page_url, existing_by_title_key
-
-
-def resolve_existing_album_song(album_url, existing_by_page_url, existing_by_title_key, song_payload):
-    for candidate in (clean_text(song_payload.get("sourceUrl")), clean_text(song_payload.get("songPageUrl"))):
-        if not candidate or candidate == album_url:
-            continue
-        if candidate and candidate in existing_by_page_url:
-            return existing_by_page_url[candidate]
-    title_key = song_identity_key(song_payload.get("title"))
-    if not title_key:
-        return None
-    matches = existing_by_title_key.get(title_key) or []
-    if len(matches) == 1:
-        return matches[0]
-    return None
-
-
 def build_index_payload(raw_catalog=None):
     raw_catalog = raw_catalog or load_raw_catalog()
     songs = []
@@ -1142,14 +873,6 @@ def sync_db_from_catalog(raw_catalog):
     updated_at = utc_now()
     with get_db_connection() as connection:
         connection.execute("PRAGMA foreign_keys = ON")
-        ensure_playlist_tables(connection)
-        playlist_item_backup = connection.execute(
-            """
-            SELECT playlist_id, song_id, position, created_at
-            FROM playlist_items
-            ORDER BY playlist_id, position, song_id
-            """
-        ).fetchall()
         connection.execute("DELETE FROM download_links")
         connection.execute("DELETE FROM songs")
         connection.execute("DELETE FROM albums")
@@ -1239,31 +962,6 @@ def sync_db_from_catalog(raw_catalog):
                 link_rows,
             )
 
-        if playlist_item_backup:
-            valid_song_ids = {clean_text(song.get("id")) for song in songs_payload if clean_text(song.get("id"))}
-            valid_playlist_ids = {
-                int(row["id"])
-                for row in connection.execute("SELECT id FROM playlists").fetchall()
-            }
-            restore_rows = [
-                (
-                    int(row["playlist_id"]),
-                    clean_text(row["song_id"]),
-                    as_int(row["position"], 0) or 1,
-                    clean_text(row["created_at"]) or updated_at,
-                )
-                for row in playlist_item_backup
-                if int(row["playlist_id"]) in valid_playlist_ids and clean_text(row["song_id"]) in valid_song_ids
-            ]
-            if restore_rows:
-                connection.executemany(
-                    """
-                    INSERT OR IGNORE INTO playlist_items (playlist_id, song_id, position, created_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    restore_rows,
-                )
-
         summary = normalized_catalog.get("summary", {"albumCount": 0, "trackCount": 0})
         meta = {
             "source": normalized_catalog.get("source", SITE_ORIGIN),
@@ -1278,204 +976,100 @@ def sync_db_from_catalog(raw_catalog):
         )
 
 
-def _write_album_in_connection(connection, album_payload, content_hash=None, updated_at=None):
-    """Write one album + tracks into an open connection. Does not commit or touch app_meta."""
-    if updated_at is None:
-        updated_at = utc_now()
+def upsert_album_into_db(album_payload):
+    ensure_db()
     album = normalize_album(album_payload)
     album_url = clean_text(album.get("url"))
     if not album_url:
-        return None
+        return False
 
     songs_payload = [build_song_from_track(album, track) for track in album.get("tracks", [])]
-    album_existed = connection.execute("SELECT 1 FROM albums WHERE url = ?", (album_url,)).fetchone() is not None
-    existing_rows, existing_by_page_url, existing_by_title_key = build_existing_album_song_maps(connection, album_url)
-    existing_song_ids = {clean_text(row["id"]) for row in existing_rows if clean_text(row["id"])}
-    refreshed_song_ids = []
-    adjusted_songs_payload = []
-    tracks_inserted = 0
-    tracks_updated = 0
+    updated_at = utc_now()
 
-    for song in songs_payload:
-        payload = dict(song)
-        payload["songPageUrl"] = clean_text(payload.get("songPageUrl") or payload.get("sourceUrl"))
-        payload["sourceUrl"] = clean_text(payload.get("sourceUrl") or payload.get("songPageUrl") or album_url)
-        existing_match = resolve_existing_album_song(album_url, existing_by_page_url, existing_by_title_key, payload)
-        if existing_match is not None:
-            payload["id"] = clean_text(existing_match["id"]) or payload.get("id")
-            tracks_updated += 1
-        else:
-            tracks_inserted += 1
-        adjusted_songs_payload.append(payload)
-        if clean_text(payload.get("id")):
-            refreshed_song_ids.append(clean_text(payload.get("id")))
-
-    stale_song_ids = sorted(existing_song_ids - set(refreshed_song_ids))
-
-    connection.execute(
-        "DELETE FROM download_links WHERE song_id IN (SELECT id FROM songs WHERE album_url = ?)",
-        (album_url,),
-    )
-    connection.execute(
-        """
-        INSERT INTO albums (
-          url, title, page_number, year, music_director, director, starring,
-          lyricists, zip_links_json, track_count, content_hash, last_checked_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(url) DO UPDATE SET
-          title = excluded.title,
-          page_number = excluded.page_number,
-          year = excluded.year,
-          music_director = excluded.music_director,
-          director = excluded.director,
-          starring = excluded.starring,
-          lyricists = excluded.lyricists,
-          zip_links_json = excluded.zip_links_json,
-          track_count = excluded.track_count,
-          content_hash = excluded.content_hash,
-          last_checked_at = excluded.last_checked_at,
-          updated_at = excluded.updated_at
-        """,
-        (
-            album_url,
-            album.get("title") or "Untitled album",
-            as_int(album.get("pageNumber")),
-            as_int(album.get("year")),
-            clean_text(album.get("musicDirector")),
-            clean_text(album.get("director")),
-            clean_text(album.get("starring")),
-            clean_text(album.get("lyricists")),
-            json.dumps(album.get("zipLinks", []), ensure_ascii=False),
-            len(album.get("tracks", [])),
-            content_hash,
-            updated_at,
-            updated_at,
-        ),
-    )
-
-    if adjusted_songs_payload:
-        connection.executemany(
+    with get_db_connection() as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("DELETE FROM download_links WHERE song_id IN (SELECT id FROM songs WHERE album_url = ?)", (album_url,))
+        connection.execute("DELETE FROM songs WHERE album_url = ?", (album_url,))
+        connection.execute(
             """
-            INSERT INTO songs (
-              id, album_url, title, artist, singers, composer, movie, year, mood,
-              song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
-              remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
-              download_links_json, spotify_json, last_refreshed_at, link_status, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              album_url = excluded.album_url,
-              title = excluded.title,
-              artist = excluded.artist,
-              singers = excluded.singers,
-              composer = excluded.composer,
-              movie = excluded.movie,
-              year = excluded.year,
-              mood = excluded.mood,
-              song_page_url = COALESCE(NULLIF(excluded.song_page_url, ''), song_page_url),
-              source_url = COALESCE(NULLIF(excluded.source_url, ''), source_url),
-              image_url = COALESCE(NULLIF(excluded.image_url, ''), image_url),
-              audio_url = COALESCE(NULLIF(excluded.audio_url, ''), audio_url),
-              audio_128_url = COALESCE(NULLIF(excluded.audio_128_url, ''), audio_128_url),
-              audio_320_url = COALESCE(NULLIF(excluded.audio_320_url, ''), audio_320_url),
-              remote_audio_128_url = COALESCE(NULLIF(excluded.remote_audio_128_url, ''), remote_audio_128_url),
-              remote_audio_320_url = COALESCE(NULLIF(excluded.remote_audio_320_url, ''), remote_audio_320_url),
-              local_audio_128_url = excluded.local_audio_128_url,
-              local_audio_320_url = excluded.local_audio_320_url,
-              download_links_json = excluded.download_links_json,
-              spotify_json = excluded.spotify_json,
-              last_refreshed_at = excluded.last_refreshed_at,
-              link_status = excluded.link_status,
-              updated_at = excluded.updated_at
+            INSERT OR REPLACE INTO albums (
+              url, title, page_number, year, music_director, director, starring,
+              lyricists, zip_links_json, track_count, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            [
-                (
-                    song.get("id"),
-                    album_url,
-                    song.get("title") or "Untitled",
-                    clean_text(song.get("artist")),
-                    clean_text(song.get("artist")),
-                    clean_text(song.get("composer")),
-                    clean_text(song.get("movie")),
-                    as_int(song.get("year")),
-                    clean_text(song.get("mood")) or "Imported",
-                    clean_text(song.get("sourceUrl")),
-                    clean_text(song.get("sourceUrl")),
-                    clean_text(song.get("imageUrl")),
-                    clean_text(song.get("audioUrl")),
-                    clean_text(song.get("audio128Url")),
-                    clean_text(song.get("audio320Url")),
-                    clean_text(song.get("remoteAudio128Url")),
-                    clean_text(song.get("remoteAudio320Url")),
-                    clean_text(song.get("localAudio128Url")),
-                    clean_text(song.get("localAudio320Url")),
-                    json.dumps(song.get("downloadLinks", []), ensure_ascii=False),
-                    json.dumps(song.get("spotify", {}), ensure_ascii=False),
-                    updated_at,
-                    "fresh" if song.get("audioUrl") else "missing",
-                    updated_at,
-                )
-                for song in adjusted_songs_payload
-            ],
+            (
+                album_url,
+                album.get("title") or "Untitled album",
+                as_int(album.get("pageNumber")),
+                as_int(album.get("year")),
+                clean_text(album.get("musicDirector")),
+                clean_text(album.get("director")),
+                clean_text(album.get("starring")),
+                clean_text(album.get("lyricists")),
+                json.dumps(album.get("zipLinks", []), ensure_ascii=False),
+                len(album.get("tracks", [])),
+                updated_at,
+            ),
         )
-
-        link_rows = []
-        for song in adjusted_songs_payload:
-            for link in song.get("downloadLinks", []) or []:
-                if not clean_text(link.get("url")):
-                    continue
-                link_rows.append((
-                    song.get("id"),
-                    clean_text(link.get("url")),
-                    clean_text(link.get("label")),
-                    as_int(link.get("bitrate")),
-                ))
-        if link_rows:
+        if songs_payload:
             connection.executemany(
-                "INSERT INTO download_links (song_id, url, label, bitrate) VALUES (?, ?, ?, ?)",
-                link_rows,
+                """
+                INSERT INTO songs (
+                  id, album_url, title, artist, singers, composer, movie, year, mood,
+                  song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+                  remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
+                  download_links_json, spotify_json, last_refreshed_at, link_status, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        song.get("id"),
+                        album_url,
+                        song.get("title") or "Untitled",
+                        clean_text(song.get("artist")),
+                        clean_text(song.get("artist")),
+                        clean_text(song.get("composer")),
+                        clean_text(song.get("movie")),
+                        as_int(song.get("year")),
+                        clean_text(song.get("mood")) or "Imported",
+                        clean_text(song.get("sourceUrl")),
+                        clean_text(song.get("sourceUrl")),
+                        clean_text(song.get("imageUrl")),
+                        clean_text(song.get("audioUrl")),
+                        clean_text(song.get("audio128Url")),
+                        clean_text(song.get("audio320Url")),
+                        clean_text(song.get("remoteAudio128Url")),
+                        clean_text(song.get("remoteAudio320Url")),
+                        clean_text(song.get("localAudio128Url")),
+                        clean_text(song.get("localAudio320Url")),
+                        json.dumps(song.get("downloadLinks", []), ensure_ascii=False),
+                        json.dumps(song.get("spotify", {}), ensure_ascii=False),
+                        updated_at,
+                        "fresh" if song.get("audioUrl") else "missing",
+                        updated_at,
+                    )
+                    for song in songs_payload
+                ],
             )
 
-    if stale_song_ids:
-        placeholders = ", ".join("?" for _ in stale_song_ids)
-        connection.execute(
-            f"UPDATE songs SET link_status = 'inactive', updated_at = ? "
-            f"WHERE album_url = ? AND id IN ({placeholders})",
-            (updated_at, album_url, *stale_song_ids),
-        )
-
-    return {
-        "albumInserted": not album_existed,
-        "tracksInserted": tracks_inserted,
-        "tracksUpdated": tracks_updated,
-        "tracksRemoved": len(stale_song_ids),
-    }
-
-
-def upsert_album_into_db(album_payload, db_path=None, content_hash=None):
-    target_db = Path(db_path) if db_path else DB_PATH
-    if target_db == DB_PATH:
-        ensure_db()
-    elif not target_db.exists():
-        return False
-    album_url = clean_text(normalize_album(album_payload).get("url"))
-    if not album_url:
-        return False
-
-    updated_at = utc_now()
-    with get_sqlite_connection(target_db) as connection:
-        connection.execute("PRAGMA foreign_keys = ON")
-
-        if content_hash:
-            stored = connection.execute("SELECT content_hash FROM albums WHERE url = ?", (album_url,)).fetchone()
-            if stored and stored["content_hash"] == content_hash:
-                connection.execute(
-                    "UPDATE albums SET last_checked_at = ? WHERE url = ?", (updated_at, album_url)
+            link_rows = []
+            for song in songs_payload:
+                for link in song.get("downloadLinks", []) or []:
+                    if not clean_text(link.get("url")):
+                        continue
+                    link_rows.append(
+                        (
+                            song.get("id"),
+                            clean_text(link.get("url")),
+                            clean_text(link.get("label")),
+                            as_int(link.get("bitrate")),
+                        )
+                    )
+            if link_rows:
+                connection.executemany(
+                    "INSERT INTO download_links (song_id, url, label, bitrate) VALUES (?, ?, ?, ?)",
+                    link_rows,
                 )
-                return {"ok": True, "skipped": True, "albumInserted": False, "tracksInserted": 0, "tracksUpdated": 0, "tracksRemoved": 0}
-
-        inner = _write_album_in_connection(connection, album_payload, content_hash=content_hash, updated_at=updated_at)
-        if inner is None:
-            return False
 
         meta_rows = dict(connection.execute("SELECT key, value FROM app_meta").fetchall())
         album_count = connection.execute("SELECT COUNT(*) FROM albums").fetchone()[0]
@@ -1495,217 +1089,67 @@ def upsert_album_into_db(album_payload, db_path=None, content_hash=None):
         )
 
     SONG_RECORD_CACHE.clear()
-    return {"ok": True, **inner}
-
-
-def batch_upsert_albums_into_db(album_entries, db_path=None, batch_size=32):
-    """Write a list of (seed, parsed_album, content_hash) triples in batched transactions.
-
-    Performs a bulk hash-check per batch: albums whose content_hash matches the stored
-    value have only last_checked_at updated; changed or new albums get a full upsert.
-    Returns aggregate stats dict.
-    """
-    target_db = Path(db_path) if db_path else DB_PATH
-    if target_db == DB_PATH:
-        ensure_db()
-
-    stats = {
-        "unchanged": 0,
-        "albumsInserted": 0,
-        "albumsUpdated": 0,
-        "tracksInserted": 0,
-        "tracksUpdated": 0,
-        "tracksRemoved": 0,
-    }
-
-    # Normalise to (payload, hash) pairs — accepts 2-tuple or 3-tuple input
-    pairs = []
-    for entry in album_entries:
-        if len(entry) == 3:
-            _, payload, chash = entry
-        else:
-            payload, chash = entry
-        pairs.append((payload, chash))
-
-    for batch_start in range(0, len(pairs), batch_size):
-        batch = pairs[batch_start : batch_start + batch_size]
-        batch_urls = [clean_text(p.get("url")) for p, _ in batch if clean_text(p.get("url"))]
-
-        with get_sqlite_connection(target_db) as connection:
-            connection.execute("PRAGMA foreign_keys = ON")
-
-            # Bulk-load existing hashes for the whole batch in one query
-            stored_hashes: dict = {}
-            if batch_urls:
-                ph = ",".join("?" * len(batch_urls))
-                for row in connection.execute(f"SELECT url, content_hash FROM albums WHERE url IN ({ph})", batch_urls):
-                    stored_hashes[row["url"]] = row["content_hash"]
-
-            updated_at = utc_now()
-
-            for album_payload, chash in batch:
-                album_url = clean_text(album_payload.get("url") if album_payload else "")
-                if not album_url:
-                    continue
-
-                if chash and stored_hashes.get(album_url) == chash:
-                    connection.execute(
-                        "UPDATE albums SET last_checked_at = ? WHERE url = ?", (updated_at, album_url)
-                    )
-                    stats["unchanged"] += 1
-                    continue
-
-                inner = _write_album_in_connection(connection, album_payload, content_hash=chash, updated_at=updated_at)
-                if inner is None:
-                    continue
-                if inner["albumInserted"]:
-                    stats["albumsInserted"] += 1
-                else:
-                    stats["albumsUpdated"] += 1
-                stats["tracksInserted"] += inner["tracksInserted"]
-                stats["tracksUpdated"] += inner["tracksUpdated"]
-                stats["tracksRemoved"] += inner["tracksRemoved"]
-                # Cache the just-written hash so duplicate URLs later in the same batch are skipped
-                if chash:
-                    stored_hashes[album_url] = chash
-
-            # Update meta once per batch
-            meta_rows = dict(connection.execute("SELECT key, value FROM app_meta").fetchall())
-            album_count = connection.execute("SELECT COUNT(*) FROM albums").fetchone()[0]
-            track_count = connection.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
-            stored_source = clean_text(meta_rows.get("source"))
-            if not stored_source or stored_source == SITE_ORIGIN:
-                first_url = next((clean_text(p.get("url")) for p, _ in batch if clean_text(p.get("url"))), "")
-                if first_url:
-                    stored_source = origin_from_url(first_url)
-            connection.executemany(
-                "INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)",
-                [
-                    ("source", stored_source or SITE_ORIGIN),
-                    ("ingestedAt", meta_rows.get("ingestedAt") or updated_at),
-                    ("updatedAt", updated_at),
-                    ("albumCount", str(album_count)),
-                    ("trackCount", str(track_count)),
-                ],
-            )
-
-    SONG_RECORD_CACHE.clear()
-    return stats
-
-
-def library_song_sort_key(song):
-    return (
-        -(as_int(song.get("year")) or 0),
-        clean_text(song.get("movie")).lower(),
-        clean_text(song.get("title")).lower(),
-        clean_text(song.get("id")).lower(),
-    )
-
-
-def build_index_payload_from_connection(connection, source_fallback=SITE_ORIGIN, id_prefix="", use_local_media=True):
-    meta_rows = dict(connection.execute("SELECT key, value FROM app_meta").fetchall())
-    album_count = connection.execute("SELECT COUNT(*) FROM albums").fetchone()[0]
-    songs = []
-    for row in connection.execute(
-        """
-        SELECT id, album_url, title, artist, composer, movie, year, mood, audio_url, audio_128_url, audio_320_url,
-               remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
-               source_url, image_url, download_links_json, spotify_json, last_refreshed_at, link_status
-        FROM songs
-        WHERE link_status != 'inactive'
-        ORDER BY year DESC, movie COLLATE NOCASE, title COLLATE NOCASE
-        """
-    ):
-        song = dict(row)
-        if is_noise_song_payload(song["title"], song["movie"]):
-            continue
-        stream_song_id = f"{id_prefix}{song['id']}" if id_prefix else str(song["id"])
-        payload = build_song_payload_from_row(
-            row,
-            stream_song_id=stream_song_id,
-            use_local_media=use_local_media,
-        )
-        if payload:
-            songs.append(payload)
-
-    songs.sort(key=library_song_sort_key)
-    decades = sorted({f"{(song['year'] // 10) * 10}s" for song in songs if song.get("year")})
-    moods = sorted({clean_text(song.get("mood")) or "Imported" for song in songs})
-    return {
-        "source": meta_rows.get("source", source_fallback),
-        "updatedAt": meta_rows.get("updatedAt") or utc_now(),
-        "summary": {
-            "albumCount": as_int(album_count),
-            "trackCount": len(songs),
-        },
-        "filters": {"decades": decades, "moods": moods},
-        "songs": songs,
-    }
+    return True
 
 
 def build_index_payload_from_db():
     ensure_db()
     with get_db_connection() as connection:
-        return build_index_payload_from_connection(connection, source_fallback=SITE_ORIGIN)
+        meta_rows = dict(connection.execute("SELECT key, value FROM app_meta").fetchall())
+        songs = []
+        for row in connection.execute(
+            """
+            SELECT id, album_url, title, artist, composer, movie, year, mood, audio_url, audio_128_url, audio_320_url,
+                   remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
+                   source_url, image_url, download_links_json, spotify_json, last_refreshed_at, link_status
+            FROM songs
+            ORDER BY year DESC, movie COLLATE NOCASE, title COLLATE NOCASE
+            """
+        ):
+            song = dict(row)
+            if is_noise_song_payload(song["title"], song["movie"]):
+                continue
+            song["downloadLinks"] = json.loads(song.pop("download_links_json") or "[]")
+            song["spotify"] = json.loads(song.pop("spotify_json") or "{}")
+            local_128_url = media_url(song["id"], 128)
+            local_320_url = media_url(song["id"], 320)
+            songs.append(
+                {
+                    "id": song["id"],
+                    "albumUrl": song["album_url"],
+                    "title": clean_display_text(song["title"], "Untitled"),
+                    "artist": clean_display_text(song["artist"], "Unknown artist"),
+                    "composer": clean_display_text(song["composer"], "Unknown composer"),
+                    "movie": clean_display_text(song["movie"], "Unknown movie"),
+                    "year": as_int(song["year"]) or infer_year_from_sources(song["album_url"], song["movie"], song["title"]),
+                    "mood": song["mood"] or "Imported",
+                    "audioUrl": public_stream_url(song["id"]),
+                    "audio128Url": song["audio_128_url"],
+                    "audio320Url": song["audio_320_url"],
+                    "remoteAudio128Url": song["remote_audio_128_url"],
+                    "remoteAudio320Url": song["remote_audio_320_url"],
+                    "localAudio128Url": local_128_url,
+                    "localAudio320Url": local_320_url,
+                    "sourceUrl": song["source_url"],
+                    "imageUrl": song["image_url"],
+                    "downloadLinks": song["downloadLinks"],
+                    "spotify": song["spotify"],
+                    "lastRefreshedAt": song["last_refreshed_at"],
+                    "linkStatus": song["link_status"],
+                }
+            )
 
-
-def build_telugu_index_payload_from_db():
-    if not telugu_catalog_enabled():
-        return {
-            "source": TELUGU_SITE_ORIGIN,
-            "updatedAt": None,
-            "summary": {"albumCount": 0, "trackCount": 0},
-            "filters": {"decades": [], "moods": []},
-            "songs": [],
-        }
-    with get_sqlite_connection(TELUGU_DB_PATH) as connection:
-        return build_index_payload_from_connection(
-            connection,
-            source_fallback=TELUGU_SITE_ORIGIN,
-            id_prefix=TELUGU_ID_PREFIX,
-            use_local_media=False,
-        )
-
-
-def merge_index_payloads(local_payload, telugu_payload=None):
-    telugu_payload = telugu_payload or {
-        "summary": {"albumCount": 0, "trackCount": 0},
-        "filters": {"decades": [], "moods": []},
-        "songs": [],
-        "updatedAt": None,
-    }
-    merged_songs = sorted(
-        [*local_payload.get("songs", []), *telugu_payload.get("songs", [])],
-        key=library_song_sort_key,
-    )
-    updated_at_candidates = [
-        clean_text(local_payload.get("updatedAt")),
-        clean_text(telugu_payload.get("updatedAt")),
-    ]
-    updated_at_candidates = [item for item in updated_at_candidates if item]
+    decades = sorted({f"{(song['year'] // 10) * 10}s" for song in songs if song.get("year")})
+    moods = sorted({clean_text(song.get("mood")) or "Imported" for song in songs})
     return {
-        "source": local_payload.get("source", SITE_ORIGIN),
-        "updatedAt": max(updated_at_candidates) if updated_at_candidates else utc_now(),
+        "source": meta_rows.get("source", SITE_ORIGIN),
+        "updatedAt": meta_rows.get("updatedAt") or utc_now(),
         "summary": {
-            "albumCount": as_int(local_payload.get("summary", {}).get("albumCount"))
-            + as_int(telugu_payload.get("summary", {}).get("albumCount")),
-            "trackCount": len(merged_songs),
+            "albumCount": as_int(meta_rows.get("albumCount")),
+            "trackCount": as_int(meta_rows.get("trackCount")),
         },
-        "filters": {
-            "decades": sorted(
-                {
-                    *local_payload.get("filters", {}).get("decades", []),
-                    *telugu_payload.get("filters", {}).get("decades", []),
-                }
-            ),
-            "moods": sorted(
-                {
-                    *local_payload.get("filters", {}).get("moods", []),
-                    *telugu_payload.get("filters", {}).get("moods", []),
-                }
-            ),
-        },
-        "songs": merged_songs,
+        "filters": {"decades": decades, "moods": moods},
+        "songs": songs,
     }
 
 
@@ -1812,28 +1256,17 @@ def load_bad_song_page_albums():
 def ensure_index():
     ensure_data_dir()
     ensure_db()
-    with get_db_connection() as connection:
-        db_has_catalog = bool(
-            connection.execute("SELECT 1 FROM albums LIMIT 1").fetchone()
-            or connection.execute("SELECT 1 FROM songs LIMIT 1").fetchone()
-        )
-
-    if db_has_catalog:
-        local_payload = write_runtime_catalog_files_from_db()
-    else:
+    try:
+        normalized_catalog = normalize_catalog()
+        write_json(RAW_CATALOG_PATH, normalized_catalog)
         try:
-            normalized_catalog = normalize_catalog()
-            write_json(RAW_CATALOG_PATH, normalized_catalog)
-            if normalized_catalog.get("albums"):
-                try:
-                    sync_db_from_catalog(normalized_catalog)
-                except sqlite3.IntegrityError:
-                    write_json(RAW_CATALOG_PATH, build_raw_catalog_from_db())
-            local_payload = build_index_payload_from_db()
-        except json.JSONDecodeError:
-            local_payload = write_runtime_catalog_files_from_db()
+            sync_db_from_catalog(normalized_catalog)
+        except sqlite3.IntegrityError:
+            write_json(RAW_CATALOG_PATH, build_raw_catalog_from_db())
+    except json.JSONDecodeError:
+        write_json(RAW_CATALOG_PATH, build_raw_catalog_from_db())
 
-    payload = merge_index_payloads(local_payload, build_telugu_index_payload_from_db())
+    payload = build_index_payload_from_db()
 
     global SONG_INDEX, APP_STATE
     indexed = []
@@ -1984,19 +1417,17 @@ def mark_refresh_result(song_id, ok, message=""):
     return current
 
 
-def build_song_payload_from_row(row, stream_song_id=None, use_local_media=True):
+def build_song_payload_from_row(row):
     if row is None:
         return None
 
     song = dict(row)
-    raw_song_id = clean_text(song["id"])
-    stream_id = clean_text(stream_song_id) or raw_song_id
-    local_128_url = media_url(raw_song_id, 128) if use_local_media else None
-    local_320_url = media_url(raw_song_id, 320) if use_local_media else None
+    local_128_url = media_url(song["id"], 128)
+    local_320_url = media_url(song["id"], 320)
     download_links = json.loads(song.get("download_links_json") or "[]")
     spotify = json.loads(song.get("spotify_json") or "{}")
     return {
-        "id": stream_id,
+        "id": song["id"],
         "albumUrl": song["album_url"],
         "title": clean_display_text(song["title"], "Untitled"),
         "artist": clean_display_text(song["artist"], "Unknown artist"),
@@ -2004,7 +1435,7 @@ def build_song_payload_from_row(row, stream_song_id=None, use_local_media=True):
         "movie": clean_display_text(song["movie"], "Unknown movie"),
         "year": as_int(song["year"]) or infer_year_from_sources(song["album_url"], song["movie"], song["title"]),
         "mood": song["mood"] or "Imported",
-        "audioUrl": public_stream_url(stream_id),
+        "audioUrl": public_stream_url(song["id"]),
         "audio128Url": song["audio_128_url"],
         "audio320Url": song["audio_320_url"],
         "remoteAudio128Url": song["remote_audio_128_url"],
@@ -2020,17 +1451,9 @@ def build_song_payload_from_row(row, stream_song_id=None, use_local_media=True):
     }
 
 
-def load_song_db_row(song_id, db_path=None):
-    storage = get_song_storage(song_id)
-    target_path = db_path or storage["db_path"]
-    target_song_id = clean_text(song_id if db_path else storage["song_id"])
-    if not target_song_id:
-        return None
-    if target_path == DB_PATH:
-        ensure_db()
-    elif not Path(target_path).exists():
-        return None
-    with get_sqlite_connection(target_path) as connection:
+def load_song_db_row(song_id):
+    ensure_db()
+    with get_db_connection() as connection:
         return connection.execute(
             """
             SELECT id, album_url, title, artist, singers, composer, movie, year, mood,
@@ -2040,7 +1463,7 @@ def load_song_db_row(song_id, db_path=None):
             FROM songs
             WHERE id = ?
             """,
-            (target_song_id,),
+            (str(song_id),),
         ).fetchone()
 
 
@@ -2049,15 +1472,7 @@ def load_song_record(song_id):
     cached = SONG_RECORD_CACHE.get(key)
     if cached is not None:
         return cached
-    storage = get_song_storage(song_id)
-    if storage["db_path"] == TELUGU_DB_PATH and not telugu_catalog_enabled():
-        payload = None
-    else:
-        payload = build_song_payload_from_row(
-            load_song_db_row(song_id),
-            stream_song_id=key,
-            use_local_media=storage["use_local_media"],
-        )
+    payload = build_song_payload_from_row(load_song_db_row(song_id))
     SONG_RECORD_CACHE[key] = payload
     return payload
 
@@ -2066,39 +1481,41 @@ def load_song_records(song_ids):
     ordered_ids = [str(song_id) for song_id in song_ids if clean_text(song_id)]
     if not ordered_ids:
         return []
-    records = []
-    for song_id in ordered_ids:
-        payload = load_song_record(song_id)
-        if payload:
-            records.append(payload)
-    return records
 
+    missing_ids = [song_id for song_id in ordered_ids if song_id not in SONG_RECORD_CACHE]
+    if missing_ids:
+        placeholders = ",".join("?" for _ in missing_ids)
+        ensure_db()
+        with get_db_connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, album_url, title, artist, singers, composer, movie, year, mood,
+                       song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+                       remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
+                       download_links_json, spotify_json, last_refreshed_at, link_status
+                FROM songs
+                WHERE id IN ({placeholders})
+                """,
+                tuple(missing_ids),
+            ).fetchall()
+        for row in rows:
+            payload = build_song_payload_from_row(row)
+            if payload:
+                SONG_RECORD_CACHE[str(payload["id"])] = payload
 
-def load_playlist_records(include_song_ids=False):
-    ensure_db()
-    with get_db_connection() as connection:
-        return list_playlists(connection, include_song_ids=include_song_ids)
-
-
-def load_playlist_record_by_slug(playlist_slug):
-    ensure_db()
-    with get_db_connection() as connection:
-        return load_playlist(connection, playlist_slug)
+    return [SONG_RECORD_CACHE[song_id] for song_id in ordered_ids if SONG_RECORD_CACHE.get(song_id)]
 
 
 def update_song_link_status(song_id, link_status, refreshed_at=None):
-    storage = get_song_storage(song_id)
-    if storage["db_path"] == TELUGU_DB_PATH and not telugu_catalog_enabled():
-        return
     timestamp = refreshed_at or utc_now()
-    with get_sqlite_connection(storage["db_path"]) as connection:
+    with get_db_connection() as connection:
         connection.execute(
             """
             UPDATE songs
             SET link_status = ?, last_refreshed_at = ?, updated_at = ?
             WHERE id = ?
             """,
-            (clean_text(link_status) or "unknown", timestamp, timestamp, storage["song_id"]),
+            (clean_text(link_status) or "unknown", timestamp, timestamp, str(song_id)),
         )
     SONG_RECORD_CACHE.pop(str(song_id), None)
 
@@ -2135,13 +1552,6 @@ def fetch_remote_text(url):
 
 
 def try_refresh_song_link(song_id):
-    storage = get_song_storage(song_id)
-    db_path = storage["db_path"]
-    source_origin = storage["source_fallback"]
-
-    if db_path == TELUGU_DB_PATH and not telugu_catalog_enabled():
-        return None
-
     row = load_song_db_row(song_id)
     if row is None:
         return None
@@ -2151,7 +1561,7 @@ def try_refresh_song_link(song_id):
     seen_pages = set()
 
     def push_candidate(url):
-        absolute = absolute_url(url, source_origin)
+        absolute = absolute_url(url)
         if not absolute or absolute in seen_pages:
             return
         seen_pages.add(absolute)
@@ -2177,7 +1587,7 @@ def try_refresh_song_link(song_id):
             continue
 
         if "window.albumTracks" not in html:
-            for discovered in extract_album_links_from_html(html, base_origin=source_origin):
+            for discovered in extract_album_links_from_html(html):
                 push_candidate(discovered)
             continue
 
@@ -2190,7 +1600,7 @@ def try_refresh_song_link(song_id):
         }
 
         try:
-            if not upsert_album_into_db(album_payload, db_path=db_path):
+            if not upsert_album_into_db(album_payload):
                 continue
         except Exception:
             continue
@@ -2739,62 +2149,6 @@ class CatalogHandler(SimpleHTTPRequestHandler):
             pass
         self.respond_json({"error": "Upstream stream unavailable."}, HTTPStatus.BAD_GATEWAY)
 
-    def handle_artwork_request(self, song_id):
-        song = load_song_record(song_id)
-        attempted = set()
-        candidates = []
-        if song:
-            candidates.append(absolute_url(song.get("imageUrl")))
-            candidates.extend(fetch_page_artwork_candidates(song))
-        fallback_candidate = fetch_itunes_artwork_candidate(song or {})
-        if fallback_candidate:
-            candidates.append(fallback_candidate)
-
-        for image_url in candidates:
-            image_url = absolute_url(image_url)
-            if not image_url or image_url in attempted:
-                continue
-            attempted.add(image_url)
-            referer = absolute_url(song.get("albumUrl") or song.get("sourceUrl") or image_url) if song else image_url
-            request = Request(
-                image_url,
-                headers={
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                    "Referer": referer,
-                    "Origin": origin_from_url(referer),
-                    "User-Agent": UPSTREAM_USER_AGENT,
-                },
-            )
-            try:
-                with urlopen(request, timeout=UPSTREAM_PAGE_TIMEOUT_SECONDS) as response:
-                    payload = response.read()
-                    content_type = clean_text(response.headers.get("Content-Type")) or "image/jpeg"
-                    if song and image_url != absolute_url(song.get("imageUrl")):
-                        persist_song_artwork(song_id, image_url)
-                    self.send_response(HTTPStatus.OK)
-                    self.send_header("Content-Type", content_type)
-                    self.send_header("Content-Length", str(len(payload)))
-                    self.send_header("Cache-Control", "public, max-age=86400")
-                    self.end_headers()
-                    self.wfile.write(payload)
-                    return
-            except (HTTPError, URLError, TimeoutError, ValueError):
-                continue
-        self.serve_default_artwork()
-
-    def serve_default_artwork(self):
-        fallback_path = ROOT / "Sruthi_kutty.jpg"
-        if not fallback_path.exists():
-            self.respond_json({"error": "Artwork unavailable."}, HTTPStatus.NOT_FOUND)
-            return
-        payload = fallback_path.read_bytes()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", "image/jpeg")
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Cache-Control", "public, max-age=86400")
-        self.end_headers()
-        self.wfile.write(payload)
-
     def do_GET(self):
         parsed = urlparse(self.path)
 
@@ -2836,12 +2190,6 @@ class CatalogHandler(SimpleHTTPRequestHandler):
             self.handle_stream_request(song_id)
             return
 
-        if parsed.path == "/api/artwork":
-            params = parse_qs(parsed.query)
-            song_id = params.get("id", [""])[0]
-            self.handle_artwork_request(song_id)
-            return
-
         if parsed.path == "/api/library":
             params = parse_qs(parsed.query)
             query = params.get("query", [""])[0]
@@ -2865,7 +2213,11 @@ class CatalogHandler(SimpleHTTPRequestHandler):
             return
 
         if parsed.path == "/api/playlists":
-            self.respond_json({"playlists": load_playlist_records(include_song_ids=False)})
+            try:
+                payload = json.loads(fetch_remote_text("https://sruthi.vklokesh70.workers.dev/api/playlists") or "{}")
+            except Exception:
+                payload = {"playlists": []}
+            self.respond_json(payload)
             return
 
         if parsed.path == "/api/playlist":
@@ -2873,12 +2225,16 @@ class CatalogHandler(SimpleHTTPRequestHandler):
             if not playlist_id:
                 self.respond_json({"error": "Playlist id is required."}, HTTPStatus.BAD_REQUEST)
                 return
-            payload = load_playlist_record_by_slug(playlist_id)
-            if payload is None:
-                self.respond_json({"error": "Playlist unavailable."}, HTTPStatus.NOT_FOUND)
-                return
-            payload["songs"] = load_song_records(payload.get("songIds") or [])
-            status = HTTPStatus.OK
+            try:
+                payload = json.loads(
+                    fetch_remote_text(
+                        f"https://sruthi.vklokesh70.workers.dev/api/playlist?id={quote_plus(playlist_id)}"
+                    )
+                    or "{}"
+                )
+            except Exception:
+                payload = {"error": "Playlist unavailable."}
+            status = HTTPStatus.OK if "error" not in payload else HTTPStatus.BAD_GATEWAY
             self.respond_json(payload, status)
             return
 
