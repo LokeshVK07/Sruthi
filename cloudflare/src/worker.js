@@ -789,6 +789,10 @@ async function handleApi(request, env, url, ctx) {
     return json({ ok: true, queued: (rows.results || []).length });
   }
 
+  if (url.pathname === "/api/artwork") {
+    return handleArtwork(url, request, env, ctx);
+  }
+
   if (url.pathname.startsWith("/api/stream/")) {
     const songId = cleanText(url.pathname.split("/").pop());
     if (isTeluguSongId(songId)) {
@@ -800,24 +804,90 @@ async function handleApi(request, env, url, ctx) {
   return json({ error: "Not found." }, 404);
 }
 
-async function fetchFreshAudioUrl(row) {
+async function handleArtwork(url, request, env, ctx) {
+  const songId = cleanText(url.searchParams.get("id"));
+  if (!songId) return new Response(null, { status: 400, headers: corsHeaders() });
+
+  // Check Cloudflare cache first (artwork is static; cache for 24h).
+  const cacheKey = new Request(request.url, { method: "GET" });
+  const cached = await caches.default.match(cacheKey);
+  if (cached) return withCors(cached);
+
+  const row = await env.DB.prepare("SELECT image_url, album_url FROM songs WHERE id = ? LIMIT 1")
+    .bind(songId).first();
+  const imageUrl = cleanText(row?.image_url);
+  if (!imageUrl) return new Response(null, { status: 404, headers: corsHeaders() });
+
+  const upstream = await fetch(imageUrl, {
+    headers: {
+      Accept: "image/jpeg,image/webp,image/*,*/*;q=0.8",
+      Referer: cleanText(row?.album_url) || SITE_ORIGIN,
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    },
+    redirect: "follow",
+  });
+
+  if (!upstream.ok) return new Response(null, { status: 502, headers: corsHeaders() });
+
+  const outHeaders = new Headers(corsHeaders());
+  outHeaders.set("Content-Type", upstream.headers.get("content-type") || "image/jpeg");
+  if (upstream.headers.get("content-length")) outHeaders.set("Content-Length", upstream.headers.get("content-length"));
+  outHeaders.set("Cache-Control", "public, max-age=86400, immutable");
+
+  const response = new Response(upstream.body, { status: 200, headers: outHeaders });
+  ctx?.waitUntil(caches.default.put(cacheKey, response.clone()));
+  return response;
+}
+
+function trackDlUrl(track, albumUrl) {
+  const primary = cleanText(track?.dl_path);
+  if (!primary) return null;
+  if (primary.includes("/p128_cdn/")) return absoluteUrl(primary.replace("/p128_cdn/", "/p320_cdn/"), albumUrl);
+  return absoluteUrl(primary, albumUrl);
+}
+
+async function fetchFreshAudioUrl(row, env) {
   const albumUrl = cleanText(row.album_url);
   if (!albumUrl) return null;
+
+  const songId = String(cleanText(String(row.id)));
+  const songPageUrl = cleanText(row.song_page_url);
+  const kvKey = `tracks:${albumUrl}`;
+
+  // KV cache hit → return immediately without any upstream fetch.
+  if (env?.TOKEN_CACHE) {
+    try {
+      const cached = await env.TOKEN_CACHE.get(kvKey, "json");
+      if (Array.isArray(cached)) {
+        const entry =
+          cached.find((t) => String(t.id) === songId) ||
+          (songPageUrl && cached.find((t) => t.sp === songPageUrl)) ||
+          null;
+        if (entry?.dl) return entry.dl;
+      }
+    } catch {}
+  }
+
+  // KV miss — fetch the album page for fresh signed URLs.
   const html = await fetchText(albumUrl);
   if (!html || !html.includes("window.albumTracks")) return null;
   const tracks = extractAlbumTracks(html);
   if (!tracks.length) return null;
-  const songId = String(cleanText(String(row.id)));
-  const songPageUrl = cleanText(row.song_page_url);
+
+  // Populate KV cache for the whole album (30-minute TTL matches typical token life).
+  if (env?.TOKEN_CACHE) {
+    const payload = tracks
+      .map((t) => ({ id: String(t.id || ""), sp: cleanText(t.songPageUrl), dl: trackDlUrl(t, albumUrl) }))
+      .filter((t) => t.dl);
+    env.TOKEN_CACHE.put(kvKey, JSON.stringify(payload), { expirationTtl: 1800 }).catch(() => {});
+  }
+
   const track =
     tracks.find((t) => String(t.id || "") === songId) ||
     (songPageUrl && tracks.find((t) => cleanText(t.songPageUrl) === songPageUrl)) ||
     null;
-  if (!track) return null;
-  const primary = cleanText(track.dl_path);
-  if (!primary) return null;
-  if (primary.includes("/p128_cdn/")) return absoluteUrl(primary.replace("/p128_cdn/", "/p320_cdn/"), albumUrl);
-  return absoluteUrl(primary, albumUrl);
+  return trackDlUrl(track, albumUrl);
 }
 
 async function handleStream(songId, request, env, ctx) {
@@ -839,10 +909,10 @@ async function handleStream(songId, request, env, ctx) {
 
   if (!row) return json({ error: "Song not found." }, 404);
 
-  // Start fetching a fresh signed URL from the album page immediately.
-  // Stored URLs are session-tied to the scraper and always return 403 from the Worker,
-  // so we fetch the album page in parallel so it's ready as soon as stored URLs fail.
-  const freshUrlPromise = fetchFreshAudioUrl(row);
+  // Start fresh-URL lookup immediately. When TOKEN_CACHE has the album, this
+  // resolves in ~5 ms (KV read). Even on a miss it runs in parallel with the
+  // stale-URL attempt below, so no wall-clock time is wasted.
+  const freshUrlPromise = fetchFreshAudioUrl(row, env);
 
   let response = await tryAudioCandidates(row, request);
   if (response) {
@@ -850,18 +920,20 @@ async function handleStream(songId, request, env, ctx) {
     return response;
   }
 
-  // Stored URLs failed — use the fresh URL from the album page fetch running in parallel.
+  // Stored URLs returned 403. Await the fresh URL (usually already resolved).
   const freshUrl = await freshUrlPromise;
   if (freshUrl) {
     response = await fetchAudio(freshUrl, cleanText(row.album_url), range);
     if (response) {
       if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
+      // Refresh the DB token rows in the background so future stored-URL
+      // checks will succeed until the KV entry also covers the album.
       ctx?.waitUntil(tryRefreshSongLink(env, row));
       return response;
     }
   }
 
-  // Fallback: full DB refresh (covers albums where album_url changed or track id shifted).
+  // Last resort: full DB refresh (handles renamed album_url, shifted track ids, etc.).
   const refreshed = await tryRefreshSongLink(env, row);
   if (refreshed) {
     row = refreshed;

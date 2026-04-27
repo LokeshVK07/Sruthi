@@ -18,6 +18,12 @@
       "database_id": "7e7f8f48-5f15-4ac8-bec0-37a899ddb33b"
     }
   ],
+  "kv_namespaces": [
+    {
+      "binding": "TOKEN_CACHE",
+      "id": "85855aff55d44d2db2effa99d69b0bdf"
+    }
+  ],
   "services": [
     {
       "binding": "TELUGU_SERVICE",
