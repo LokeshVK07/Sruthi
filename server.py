@@ -1359,14 +1359,14 @@ def upsert_album_into_db(album_payload, db_path=None):
                   movie = excluded.movie,
                   year = excluded.year,
                   mood = excluded.mood,
-                  song_page_url = excluded.song_page_url,
-                  source_url = excluded.source_url,
-                  image_url = excluded.image_url,
-                  audio_url = excluded.audio_url,
-                  audio_128_url = excluded.audio_128_url,
-                  audio_320_url = excluded.audio_320_url,
-                  remote_audio_128_url = excluded.remote_audio_128_url,
-                  remote_audio_320_url = excluded.remote_audio_320_url,
+                  song_page_url = COALESCE(NULLIF(excluded.song_page_url, ''), song_page_url),
+                  source_url = COALESCE(NULLIF(excluded.source_url, ''), source_url),
+                  image_url = COALESCE(NULLIF(excluded.image_url, ''), image_url),
+                  audio_url = COALESCE(NULLIF(excluded.audio_url, ''), audio_url),
+                  audio_128_url = COALESCE(NULLIF(excluded.audio_128_url, ''), audio_128_url),
+                  audio_320_url = COALESCE(NULLIF(excluded.audio_320_url, ''), audio_320_url),
+                  remote_audio_128_url = COALESCE(NULLIF(excluded.remote_audio_128_url, ''), remote_audio_128_url),
+                  remote_audio_320_url = COALESCE(NULLIF(excluded.remote_audio_320_url, ''), remote_audio_320_url),
                   local_audio_128_url = excluded.local_audio_128_url,
                   local_audio_320_url = excluded.local_audio_320_url,
                   download_links_json = excluded.download_links_json,
@@ -1427,8 +1427,9 @@ def upsert_album_into_db(album_payload, db_path=None):
         if stale_song_ids:
             placeholders = ", ".join("?" for _ in stale_song_ids)
             connection.execute(
-                f"DELETE FROM songs WHERE album_url = ? AND id IN ({placeholders})",
-                (album_url, *stale_song_ids),
+                f"UPDATE songs SET link_status = 'inactive', updated_at = ? "
+                f"WHERE album_url = ? AND id IN ({placeholders})",
+                (updated_at, album_url, *stale_song_ids),
             )
 
         meta_rows = dict(connection.execute("SELECT key, value FROM app_meta").fetchall())
@@ -1477,6 +1478,7 @@ def build_index_payload_from_connection(connection, source_fallback=SITE_ORIGIN,
                remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
                source_url, image_url, download_links_json, spotify_json, last_refreshed_at, link_status
         FROM songs
+        WHERE link_status != 'inactive'
         ORDER BY year DESC, movie COLLATE NOCASE, title COLLATE NOCASE
         """
     ):

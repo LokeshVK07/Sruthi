@@ -794,7 +794,7 @@ def refresh_albums(session, albums, args):
                 action = "Inserted" if is_new_album else "Updated"
                 print(
                     f"  [{done_count}/{total}] {action}: {title} "
-                    f"({track_count} tracks: +{ins} new, ~{upd} updated, -{rem} removed)"
+                    f"({track_count} tracks: +{ins} new, ~{upd} updated, -{rem} inactive)"
                 )
             except Exception as error:  # noqa: BLE001
                 failed.append({"url": album["url"], "title": album["title"], "error": str(error)})
@@ -968,7 +968,7 @@ def main():
         "albumsFailed": len(failed),
         "tracksInserted": stats.get("tracksInserted", 0),
         "tracksUpdated": stats.get("tracksUpdated", 0),
-        "tracksRemoved": stats.get("tracksRemoved", 0),
+        "tracksMarkedInactive": stats.get("tracksRemoved", 0),
         "totalAlbumCount": payload.get("summary", {}).get("albumCount", 0),
         "totalTrackCount": payload.get("summary", {}).get("trackCount", 0),
     }

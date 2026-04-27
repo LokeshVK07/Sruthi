@@ -317,19 +317,33 @@ jobs:
       - name: Validate inactive D1 slot
         run: |
           set -euo pipefail
-          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+          retry() {
+            local attempts="$1"; shift; local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then return 1; fi
+              sleep $(( attempt * 5 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
             --command "SELECT COUNT(*) AS count FROM albums;" \
             --config "${GENERATED_WRANGLER_CONFIG}" \
             --json > /tmp/albums.json
-          npx wrangler d1 execute "${TARGET_DB_NAME}" \
+          retry 3 npx wrangler d1 execute "${TARGET_DB_NAME}" \
             --remote \
-            --command "SELECT COUNT(*) AS count FROM songs;" \
+            --command "SELECT COUNT(*) AS count FROM songs WHERE link_status != 'inactive';" \
             --config "${GENERATED_WRANGLER_CONFIG}" \
             --json > /tmp/songs.json
+          retry 3 npx wrangler d1 execute "${TARGET_DB_NAME}" \
+            --remote \
+            --command "SELECT COUNT(*) AS count FROM songs WHERE link_status != 'inactive' AND (audio_128_url IS NOT NULL OR audio_320_url IS NOT NULL OR audio_url IS NOT NULL);" \
+            --config "${GENERATED_WRANGLER_CONFIG}" \
+            --json > /tmp/playable.json
           python - <<'PY'
           import json
           from pathlib import Path
+
           def extract_count(path):
             payload = json.loads(Path(path).read_text())
             stack = [payload]
@@ -342,11 +356,28 @@ jobs:
               elif isinstance(item, list):
                 stack.extend(item)
             raise SystemExit(f"No count field found in {path}")
+
           album_count = extract_count("/tmp/albums.json")
           song_count = extract_count("/tmp/songs.json")
-          if album_count <= 0 or song_count <= 0:
-            raise SystemExit(f"Remote D1 validation failed: albums={album_count}, songs={song_count}")
-          print({"albumCount": album_count, "songCount": song_count})
+          playable_count = extract_count("/tmp/playable.json")
+
+          errors = []
+          if album_count <= 0:
+            errors.append(f"album_count={album_count}: no albums in inactive D1 slot")
+          if song_count <= 0:
+            errors.append(f"song_count={song_count}: no active songs in inactive D1 slot")
+          if playable_count <= 0:
+            errors.append(f"playable_count={playable_count}: no songs with audio URLs — playback would be broken")
+          if playable_count < song_count * 0.5:
+            errors.append(f"Only {playable_count}/{song_count} songs are playable (<50%) — possible scrape failure")
+
+          if errors:
+            print("D1 validation FAILED — keeping active slot unchanged, NOT deploying:", flush=True)
+            for err in errors:
+              print(f"  ERROR: {err}", flush=True)
+            raise SystemExit(1)
+
+          print(json.dumps({"albumCount": album_count, "songCount": song_count, "playableSongCount": playable_count}))
           PY
       - name: Deploy Worker after successful import and validation
         run: |
