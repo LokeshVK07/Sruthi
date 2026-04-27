@@ -257,6 +257,7 @@ jobs:
           args=(
             --workers 4
             --batch-size 16
+            --batch-commit-size 32
             --page-delay 1.0
             --album-delay 0.8
             --retry-count 5

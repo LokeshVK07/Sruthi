@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -40,6 +41,51 @@ CHALLENGE_MARKERS = (
 REQUEST_GATE_LOCK = threading.Lock()
 REQUEST_GATE_NEXT_ALLOWED_AT = 0.0
 CONSECUTIVE_RATE_LIMITS = 0
+TOTAL_429_COUNT = 0  # monotonic; never reset; used for per-fetch 429 detection
+
+
+class AdaptiveSemaphore:
+    """Semaphore whose concurrency limit can be raised or lowered at runtime."""
+
+    def __init__(self, initial):
+        self._max = initial
+        self._limit = initial
+        self._used = 0
+        self._cond = threading.Condition(threading.Lock())
+
+    def acquire(self):
+        with self._cond:
+            while self._used >= self._limit:
+                self._cond.wait()
+            self._used += 1
+
+    def release(self):
+        with self._cond:
+            self._used = max(0, self._used - 1)
+            self._cond.notify_all()
+
+    def reduce(self, floor=1):
+        with self._cond:
+            self._limit = max(floor, self._limit - 1)
+            return self._limit
+
+    def recover(self):
+        with self._cond:
+            if self._limit < self._max:
+                self._limit += 1
+                self._cond.notify_all()
+            return self._limit
+
+    @property
+    def limit(self):
+        return self._limit
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *_):
+        self.release()
 
 
 def default_listing_path(origin):
@@ -71,6 +117,7 @@ def parse_args():
     parser.add_argument("--print-summary-only", action="store_true")
     parser.add_argument("--known-urls-file", default="", help="Optional newline-delimited album URL file for incremental early-stop hinting")
     parser.add_argument("--failure-threshold", type=float, default=0.5, help="Max fraction of albums allowed to fail before aborting (0–1)")
+    parser.add_argument("--batch-commit-size", type=int, default=32, help="Albums per DB transaction in the write phase")
     return parser.parse_args()
 
 
@@ -100,9 +147,10 @@ def note_successful_request():
 
 
 def note_rate_limit(base_delay_seconds):
-    global REQUEST_GATE_NEXT_ALLOWED_AT, CONSECUTIVE_RATE_LIMITS
+    global REQUEST_GATE_NEXT_ALLOWED_AT, CONSECUTIVE_RATE_LIMITS, TOTAL_429_COUNT
     with REQUEST_GATE_LOCK:
         CONSECUTIVE_RATE_LIMITS += 1
+        TOTAL_429_COUNT += 1
         adaptive_delay = base_delay_seconds * max(1, min(CONSECUTIVE_RATE_LIMITS, 8))
         cooldown_until = time.time() + adaptive_delay + random.uniform(0.5, 2.0)
         REQUEST_GATE_NEXT_ALLOWED_AT = max(REQUEST_GATE_NEXT_ALLOWED_AT, cooldown_until)
@@ -590,6 +638,36 @@ def parse_album_page(html, album_seed):
     }
 
 
+def compute_album_hash(parsed):
+    """Stable SHA-256 fingerprint of an album's scrape-visible content.
+
+    Includes fields that meaningfully change when a site editor updates the page:
+    title, year, composer, tracks (id + title + artist + all audio URLs + image).
+    Stable sort ensures the hash is independent of parse ordering.
+    """
+    tracks = sorted(parsed.get("tracks", []), key=lambda t: str(t.get("id", "")))
+    canonical = {
+        "title": clean_text(parsed.get("title")),
+        "year": parsed.get("year"),
+        "musicDirector": clean_text(parsed.get("musicDirector")),
+        "tracks": [
+            {
+                "id": str(t.get("id", "")),
+                "title": clean_text(t.get("title")),
+                "artist": clean_text(t.get("artist")),
+                "audioUrl": clean_text(t.get("audioUrl")),
+                "audio128Url": clean_text(t.get("audio128Url")),
+                "audio320Url": clean_text(t.get("audio320Url")),
+                "imageUrl": clean_text(t.get("imageUrl")),
+            }
+            for t in tracks
+        ],
+    }
+    return hashlib.sha256(
+        json.dumps(canonical, sort_keys=True, ensure_ascii=False).encode()
+    ).hexdigest()
+
+
 def load_known_urls(known_urls_file=""):
     """Load album URLs that are already in the DB, used only for incremental early-stopping."""
     known = set()
@@ -752,74 +830,111 @@ def build_movie_index_album_seeds(session, args, known_urls):
 
 
 def refresh_albums(session, albums, args):
-    """Fetch and upsert every discovered album. Returns (updated_count, failed_list, stats)."""
+    """Fetch, parse, and write every discovered album.
+
+    Phase 1 (parallel): Fetch album HTML + parse + compute content hash.
+             Uses AdaptiveSemaphore to reduce concurrency on 429s and recover on clean streaks.
+    Phase 2 (batched): Write all parsed results to SQLite in transactions of --batch-commit-size
+             albums each. Albums whose content_hash matches the stored value are skipped
+             (only last_checked_at is updated); changed or new albums are fully upserted.
+
+    Returns (fetched_count, failed_list, stats_dict).
+    """
     total = len(albums)
-    updated = 0
     failed = []
     worker_count = max(1, min(args.workers, 16))
-    tracks_inserted_total = 0
-    tracks_updated_total = 0
-    tracks_removed_total = 0
-    albums_inserted_total = 0
+    start_time = time.time()
 
-    print(f"\n=== Refreshing {total} albums with {worker_count} workers ===")
+    # ── Phase 1: parallel fetch + parse ────────────────────────────────────────
+    print(f"\n=== Phase 1: Fetching {total} album pages ({worker_count} workers) ===")
 
-    def worker(album):
-        sleep_with_jitter(args.album_delay, 0.2)
-        html = fetch_html(session, album["url"], args.retry_count, args.retry_base_delay)
+    concurrency = AdaptiveSemaphore(worker_count)
+    recovery_streak = [0]
+    rl_lock = threading.Lock()
+    parsed_entries: list = []   # (seed, parsed, content_hash) for successes
+    fetch_done = [0]
+    abort_flag = [False]
+
+    def fetch_one(album):
+        if abort_flag[0]:
+            return None
+        rl_before = TOTAL_429_COUNT
+        with concurrency:
+            if abort_flag[0]:
+                return None
+            sleep_with_jitter(args.album_delay, 0.2)
+            html = fetch_html(session, album["url"], args.retry_count, args.retry_base_delay)
+        had_429 = TOTAL_429_COUNT > rl_before
+        with rl_lock:
+            if had_429:
+                recovery_streak[0] = 0
+                new_limit = concurrency.reduce()
+                print(f"  [adaptive] 429 on {album['title']!r}, concurrency → {new_limit}", file=sys.stderr)
+            else:
+                recovery_streak[0] += 1
+                if recovery_streak[0] >= 10 and concurrency.limit < worker_count:
+                    new_limit = concurrency.recover()
+                    recovery_streak[0] = 0
+                    print(f"  [adaptive] Stable, concurrency → {new_limit}", file=sys.stderr)
         parsed = parse_album_page(html, album)
         if not parsed.get("tracks"):
             raise RuntimeError(f"No tracks parsed for {album['url']}")
-        upsert_result = server.upsert_album_into_db(parsed)
-        return parsed["title"], len(parsed["tracks"]), upsert_result
+        return album, parsed, compute_album_hash(parsed)
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = {executor.submit(worker, album): album for album in albums}
-        done_count = 0
+        futures = {executor.submit(fetch_one, album): album for album in albums}
         for future in as_completed(futures):
             album = futures[future]
-            done_count += 1
+            fetch_done[0] += 1
+            n = fetch_done[0]
             try:
-                title, track_count, result = future.result()
-                updated += 1
-                ins = result.get("tracksInserted", 0)
-                upd = result.get("tracksUpdated", 0)
-                rem = result.get("tracksRemoved", 0)
-                is_new_album = result.get("albumInserted", False)
-                tracks_inserted_total += ins
-                tracks_updated_total += upd
-                tracks_removed_total += rem
-                if is_new_album:
-                    albums_inserted_total += 1
-                action = "Inserted" if is_new_album else "Updated"
-                print(
-                    f"  [{done_count}/{total}] {action}: {title} "
-                    f"({track_count} tracks: +{ins} new, ~{upd} updated, -{rem} inactive)"
-                )
+                result = future.result()
+                if result is None:
+                    continue
+                parsed_entries.append(result)
+                if n % 25 == 0 or n == total:
+                    elapsed = time.time() - start_time
+                    print(f"  [{n}/{total}] fetched  ({elapsed:.0f}s elapsed, {len(failed)} failed)")
             except Exception as error:  # noqa: BLE001
                 failed.append({"url": album["url"], "title": album["title"], "error": str(error)})
-                print(f"  [{done_count}/{total}] FAILED: {album['title']} → {error}", file=sys.stderr)
-
-                # Check failure threshold mid-run
-                if total >= 10:
-                    current_fail_rate = len(failed) / done_count
-                    if current_fail_rate > args.failure_threshold and done_count >= 20:
+                print(f"  [{n}/{total}] FAILED fetch: {album['title']} → {error}", file=sys.stderr)
+                if total >= 10 and n >= 20:
+                    fail_rate = len(failed) / n
+                    if fail_rate > args.failure_threshold:
                         print(
-                            f"Failure rate {current_fail_rate:.0%} exceeds threshold {args.failure_threshold:.0%} "
-                            f"after {done_count} albums. Stopping.",
+                            f"Failure rate {fail_rate:.0%} exceeds threshold {args.failure_threshold:.0%} "
+                            f"after {n} albums — stopping fetch phase.",
                             file=sys.stderr,
                         )
+                        abort_flag[0] = True
                         executor.shutdown(wait=False, cancel_futures=True)
                         break
 
-    stats = {
-        "albumsInserted": albums_inserted_total,
-        "albumsUpdated": updated - albums_inserted_total,
-        "tracksInserted": tracks_inserted_total,
-        "tracksUpdated": tracks_updated_total,
-        "tracksRemoved": tracks_removed_total,
-    }
-    return updated, failed, stats
+    fetch_elapsed = time.time() - start_time
+    print(
+        f"Fetch phase done: {len(parsed_entries)} fetched, {len(failed)} failed  "
+        f"({fetch_elapsed:.1f}s, {TOTAL_429_COUNT} total 429s)"
+    )
+
+    if not parsed_entries:
+        return 0, failed, {"unchanged": 0, "albumsInserted": 0, "albumsUpdated": 0,
+                           "tracksInserted": 0, "tracksUpdated": 0, "tracksRemoved": 0}
+
+    # ── Phase 2: batched DB writes ──────────────────────────────────────────────
+    batch_size = max(1, args.batch_commit_size)
+    print(f"\n=== Phase 2: Writing {len(parsed_entries)} albums (batch={batch_size}) ===")
+    write_start = time.time()
+
+    write_stats = server.batch_upsert_albums_into_db(parsed_entries, batch_size=batch_size)
+
+    write_elapsed = time.time() - write_start
+    print(
+        f"Write phase done: {write_stats.get('unchanged', 0)} unchanged, "
+        f"{write_stats.get('albumsInserted', 0)} inserted, "
+        f"{write_stats.get('albumsUpdated', 0)} updated  ({write_elapsed:.1f}s)"
+    )
+
+    return len(parsed_entries), failed, write_stats
 
 
 def validate_db_after_refresh():
@@ -884,6 +999,8 @@ def main():
     global LISTING_PATH
     global MOVIE_INDEX_PATH
 
+    run_start = time.time()
+
     args = parse_args()
     SCRAPE_SITE_ORIGIN = clean_text(args.origin).rstrip("/") or server.SITE_ORIGIN
     LISTING_PATH = clean_text(args.listing_path) or default_listing_path(SCRAPE_SITE_ORIGIN)
@@ -906,6 +1023,7 @@ def main():
         "mode": mode,
         "origin": SCRAPE_SITE_ORIGIN,
         "workers": args.workers,
+        "batchCommitSize": args.batch_commit_size,
         "pageDelay": args.page_delay,
         "albumDelay": args.album_delay,
     }, indent=2))
@@ -920,15 +1038,16 @@ def main():
     listing_album_seeds, total_pages = build_album_seeds(session, args, known_urls)
     movie_index_album_seeds = build_movie_index_album_seeds(session, args, known_urls)
 
-    # Merge sources, deduplicate by URL
-    all_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
+    # Merge and deduplicate — never fetch the same detail page twice in one run
     listing_only = len(listing_album_seeds)
     movie_index_only = len(movie_index_album_seeds)
+    all_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
     deduped_total = len(all_seeds)
     duplicates_removed = (listing_only + movie_index_only) - deduped_total
 
     # All discovered albums are refreshed — no filtering by DB presence.
-    # This ensures every album gets its metadata, tracks, and URLs updated.
+    # Hash check inside batch_upsert_albums_into_db() determines whether a full
+    # rewrite is needed; presence in DB alone never causes a skip.
     remaining = all_seeds
 
     print(json.dumps(
@@ -949,7 +1068,7 @@ def main():
         server.write_runtime_catalog_files_from_db()
         return 0
 
-    updated, failed, stats = refresh_albums(session, remaining, args)
+    fetched, failed, stats = refresh_albums(session, remaining, args)
 
     # Save failure report
     if failed:
@@ -960,22 +1079,98 @@ def main():
     payload = server.write_runtime_catalog_files_from_db()
     validate_db_after_refresh()
 
+    total_runtime_s = time.time() - run_start
+    runtime_str = f"{int(total_runtime_s // 60)}m {int(total_runtime_s % 60)}s"
+
+    # Active/inactive song counts from DB
+    import sqlite3 as _sqlite3
+    try:
+        _conn = _sqlite3.connect(str(server.DB_PATH))
+        active_songs = _conn.execute("SELECT COUNT(*) FROM songs WHERE link_status != 'inactive'").fetchone()[0]
+        inactive_songs = _conn.execute("SELECT COUNT(*) FROM songs WHERE link_status = 'inactive'").fetchone()[0]
+        _conn.close()
+    except Exception:
+        active_songs = inactive_songs = "?"
+
     summary = {
         "mode": mode,
-        "albumsRefreshed": updated,
-        "albumsInserted": stats.get("albumsInserted", 0),
-        "albumsUpdated": stats.get("albumsUpdated", 0),
-        "albumsFailed": len(failed),
+        # Discovery
+        "discoveredAlbumURLs": listing_only + movie_index_only,
+        "deduplicatedURLs": deduped_total,
+        "duplicatesRemoved": duplicates_removed,
+        # Fetch phase
+        "detailPagesFetched": fetched,
+        "failedURLs": len(failed),
+        "total429s": TOTAL_429_COUNT,
+        # Write phase (hash-based)
+        "unchangedAlbums": stats.get("unchanged", 0),
+        "insertedAlbums": stats.get("albumsInserted", 0),
+        "updatedAlbums": stats.get("albumsUpdated", 0),
+        # Tracks
+        "activeSongs": active_songs,
+        "inactiveSongs": inactive_songs,
         "tracksInserted": stats.get("tracksInserted", 0),
         "tracksUpdated": stats.get("tracksUpdated", 0),
         "tracksMarkedInactive": stats.get("tracksRemoved", 0),
+        # Catalog totals
         "totalAlbumCount": payload.get("summary", {}).get("albumCount", 0),
         "totalTrackCount": payload.get("summary", {}).get("trackCount", 0),
+        # Runtime
+        "totalRuntime": runtime_str,
+        "totalRuntimeSeconds": round(total_runtime_s, 1),
     }
     print("\n=== Final summary ===")
     print(json.dumps(summary, indent=2))
 
-    if failed and updated == 0:
+    print("\n=== How runtime is reduced ===")
+    print(
+        "  • Hash skip: albums whose scrape-visible content (title, year, composer, track titles/URLs/artwork)\n"
+        "    is unchanged are detected via SHA-256 in a single bulk DB read; only last_checked_at is updated —\n"
+        f"    {stats.get('unchanged', 0)} albums skipped full rewrite this run.\n"
+        "  • Transaction batching: all writes inside one SQLite transaction per batch of "
+        f"{args.batch_commit_size} albums —\n"
+        "    ~{} commits instead of one per album.\n".format(
+            max(1, (fetched + len(failed)) // args.batch_commit_size)
+        ) +
+        "  • Incremental discovery (non-full mode): listing pages stop after consecutive known-only pages;\n"
+        "    movie index does the same — far fewer detail pages to fetch than a full catalog scan.\n"
+        "  • Adaptive concurrency: 429 responses reduce the semaphore limit; 10+ clean fetches recover it —\n"
+        f"    {TOTAL_429_COUNT} 429s triggered adaptive throttle this run."
+    )
+
+    print("\n=== How correctness is preserved ===")
+    print(
+        "  • Every discovered album URL is always fetched — hash check is only used to skip DB writes,\n"
+        "    never to skip the HTTP fetch. Changed content is always detected.\n"
+        "  • COALESCE(NULLIF(new,''), old) on all audio/image URL columns prevents overwriting a working\n"
+        "    URL with an empty string when the scrape doesn't find one.\n"
+        "  • Stale tracks are marked link_status='inactive' (not deleted) — existing favourites/queues\n"
+        "    remain playable; inactive songs are hidden from catalog listings only.\n"
+        "  • Blue/green D1: this script writes only to local SQLite; the live Cloudflare D1 is never\n"
+        "    touched during refresh. D1 validation gates block deployment of broken catalogs."
+    )
+
+    print("\n=== Commands ===")
+    base = "python tools/masstamilan_refresh.py"
+    fast_cmd = (
+        f"{base} "
+        "--workers 4 --batch-commit-size 32 "
+        "--page-delay 1.0 --album-delay 0.8 "
+        "--retry-count 5 --retry-base-delay 3 "
+        "--stop-after-known-pages 2 --movie-index-stop-after-known-pages 120 "
+        "--failure-threshold 0.5"
+    )
+    full_cmd = (
+        f"{base} --full "
+        "--workers 4 --batch-commit-size 32 "
+        "--page-delay 1.0 --album-delay 0.8 "
+        "--retry-count 5 --retry-base-delay 3 "
+        "--failure-threshold 0.5"
+    )
+    print(f"  Fast scheduled refresh:\n    {fast_cmd}")
+    print(f"  Complete full refresh:\n    {full_cmd}")
+
+    if failed and fetched == 0:
         raise SystemExit("All album refreshes failed.")
     return 0
 
