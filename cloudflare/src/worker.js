@@ -599,6 +599,7 @@ async function queryLocalLibrary(env, { query, movie, decade, offset, limit }, t
   const db = targetDb || env.DB;
   const bindings = [];
   const filters = [
+    "link_status != 'inactive'",
     "lower(title) NOT LIKE '%verifying you are human%'",
     "lower(title) NOT LIKE '%verification successful%'",
     "lower(movie) NOT LIKE '%www.masstamilan.dev%'",
@@ -730,13 +731,13 @@ async function handleApi(request, env, url, ctx) {
   if (url.pathname === "/api/app-state") {
     const [albumCountRow, trackCountRow, updatedRow, decadeRows, teluguState] = await Promise.all([
       env.DB.prepare("SELECT COUNT(*) AS count FROM albums").first(),
-      env.DB.prepare("SELECT COUNT(*) AS count FROM songs").first(),
-      env.DB.prepare("SELECT MAX(updated_at) AS updatedAt FROM songs").first(),
+      env.DB.prepare("SELECT COUNT(*) AS count FROM songs WHERE link_status != 'inactive'").first(),
+      env.DB.prepare("SELECT MAX(updated_at) AS updatedAt FROM songs WHERE link_status != 'inactive'").first(),
       env.DB.prepare(
         `
         SELECT DISTINCT ((year / 10) * 10) AS decade
         FROM songs
-        WHERE year > 0
+        WHERE year > 0 AND link_status != 'inactive'
         ORDER BY decade ASC
         `,
       ).all(),
@@ -1546,14 +1547,14 @@ async function upsertSong(env, song) {
       movie = excluded.movie,
       year = excluded.year,
       mood = excluded.mood,
-      song_page_url = excluded.song_page_url,
-      source_url = excluded.source_url,
-      image_url = excluded.image_url,
-      audio_url = excluded.audio_url,
-      audio_128_url = excluded.audio_128_url,
-      audio_320_url = excluded.audio_320_url,
-      remote_audio_128_url = excluded.remote_audio_128_url,
-      remote_audio_320_url = excluded.remote_audio_320_url,
+      song_page_url = COALESCE(NULLIF(excluded.song_page_url, ''), song_page_url),
+      source_url = COALESCE(NULLIF(excluded.source_url, ''), source_url),
+      image_url = COALESCE(NULLIF(excluded.image_url, ''), image_url),
+      audio_url = COALESCE(NULLIF(excluded.audio_url, ''), audio_url),
+      audio_128_url = COALESCE(NULLIF(excluded.audio_128_url, ''), audio_128_url),
+      audio_320_url = COALESCE(NULLIF(excluded.audio_320_url, ''), audio_320_url),
+      remote_audio_128_url = COALESCE(NULLIF(excluded.remote_audio_128_url, ''), remote_audio_128_url),
+      remote_audio_320_url = COALESCE(NULLIF(excluded.remote_audio_320_url, ''), remote_audio_320_url),
       local_audio_128_url = excluded.local_audio_128_url,
       local_audio_320_url = excluded.local_audio_320_url,
       download_links_json = excluded.download_links_json,
@@ -2026,20 +2027,20 @@ async function refreshAlbum(env, albumUrl, html, dbOverride = null) {
           movie = excluded.movie,
           year = excluded.year,
           mood = excluded.mood,
-          song_page_url = excluded.song_page_url,
-          source_url = excluded.source_url,
-          image_url = excluded.image_url,
-          audio_url = excluded.audio_url,
-          audio_128_url = excluded.audio_128_url,
-          audio_320_url = excluded.audio_320_url,
-          remote_audio_128_url = excluded.remote_audio_128_url,
-          remote_audio_320_url = excluded.remote_audio_320_url,
+          song_page_url = COALESCE(NULLIF(excluded.song_page_url, ''), song_page_url),
+          source_url = COALESCE(NULLIF(excluded.source_url, ''), source_url),
+          image_url = COALESCE(NULLIF(excluded.image_url, ''), image_url),
+          audio_url = COALESCE(NULLIF(excluded.audio_url, ''), audio_url),
+          audio_128_url = COALESCE(NULLIF(excluded.audio_128_url, ''), audio_128_url),
+          audio_320_url = COALESCE(NULLIF(excluded.audio_320_url, ''), audio_320_url),
+          remote_audio_128_url = COALESCE(NULLIF(excluded.remote_audio_128_url, ''), remote_audio_128_url),
+          remote_audio_320_url = COALESCE(NULLIF(excluded.remote_audio_320_url, ''), remote_audio_320_url),
           local_audio_128_url = excluded.local_audio_128_url,
           local_audio_320_url = excluded.local_audio_320_url,
           download_links_json = excluded.download_links_json,
           spotify_json = excluded.spotify_json,
           last_refreshed_at = excluded.last_refreshed_at,
-          link_status = excluded.link_status,
+          link_status = 'fresh',
           updated_at = excluded.updated_at
         `,
       ).bind(
@@ -2087,8 +2088,8 @@ async function refreshAlbum(env, albumUrl, html, dbOverride = null) {
     const placeholders = staleSongIds.map(() => "?").join(", ");
     statements.push(
       db.prepare(
-        `DELETE FROM songs WHERE album_url = ? AND id IN (${placeholders})`,
-      ).bind(albumUrl, ...staleSongIds),
+        `UPDATE songs SET link_status = 'inactive', updated_at = ? WHERE album_url = ? AND id IN (${placeholders})`,
+      ).bind(updatedAt, albumUrl, ...staleSongIds),
     );
   }
 
