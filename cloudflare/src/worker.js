@@ -1,10 +1,25 @@
-const DEFAULT_SYNC_PATH = "/sruthi-sync.json";
 const SITE_ORIGIN = "https://www.masstamilan.dev";
-const TELUGU_SITE_ORIGIN = "https://masstelugu.com";
+const DEFAULT_SYNC_PATH = "/sruthi-sync.json";
 const TELUGU_ID_PREFIX = "telugu:";
 const TELUGU_LIBRARY_LIMIT = 2000;
 const HOMEPAGE_RECENT_WINDOW_DAYS = 30;
-const DEFAULT_TAMIL_OFFICIAL_PLAYLISTS = [];
+const DEFAULT_TAMIL_OFFICIAL_PLAYLISTS = [
+  { id: "top-100", name: "Top 100", sourceUrl: "https://www.masstamilan.dev/playlists/top-100-songs" },
+  { id: "bgm-50", name: "BGM 50", sourceUrl: "https://www.masstamilan.dev/playlists/top-50-bgm-songs" },
+  { id: "sai-top-50", name: "Sai Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/sai-abhyankkar-top-50-songs" },
+  { id: "sean-roldan-top-50", name: "Sean Roldan Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/sean-roldan-top-50-songs" },
+  { id: "vijay-antony-top-50", name: "Vijay Antony Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/vijay-antony-top-50-songs" },
+  { id: "hiphop-tamizha-kuthu", name: "Hiphop Tamizha Kuthu", sourceUrl: "https://www.masstamilan.dev/playlists/hiphop-tamizha-top-50-songs" },
+  { id: "deva-top-50", name: "Deva Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/deva-top-50-songs" },
+  { id: "anirudh-maxxx", name: "Anirudh Maxxx", sourceUrl: "https://www.masstamilan.dev/playlists/anirudh-ravichander-top-50-songs" },
+  { id: "santhosh-narayanan-melody", name: "Santhosh Narayanan Melody", sourceUrl: "https://www.masstamilan.dev/playlists/santhosh-narayanan-top-50-songs" },
+  { id: "arr-top-50", name: "ARR Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/a-r-rahman-top-50-songs" },
+  { id: "ilaiyaraaja-top-50", name: "Ilaiyaraaja Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/ilaiyaraaja-top-50-songs" },
+  { id: "imman-top-50", name: "Imman Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/d-imman-top-50-songs" },
+  { id: "yuvan-top-50", name: "Yuvan Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/yuvan-shankar-raja-top-50-songs" },
+  { id: "harris-hits", name: "Harris Hits", sourceUrl: "https://www.masstamilan.dev/playlists/harris-jayaraj-top-50-songs" },
+  { id: "g-v-prakash-top-50", name: "G. V. Prakash Top 50", sourceUrl: "https://www.masstamilan.dev/playlists/g-v-prakash-kumar-top-50-songs" },
+];
 
 function catalogLanguage(env) {
   return cleanText(env?.CATALOG_LANGUAGE).toLowerCase() === "telugu" ? "telugu" : "tamil";
@@ -20,7 +35,7 @@ function teluguApiOrigin(env) {
 }
 
 function teluguAggregationEnabled(env) {
-  return Boolean(env?.TELUGU_DB || (env?.TELUGU_SERVICE && typeof env.TELUGU_SERVICE.fetch === "function") || teluguApiOrigin(env));
+  return Boolean(teluguApiOrigin(env));
 }
 
 function isTeluguSongId(songId) {
@@ -52,50 +67,20 @@ async function fetchTeluguResponse(env, path, init = {}) {
   if (!base) {
     throw new Error("Telugu catalog is unavailable.");
   }
-  return fetch(`${base}${path}`, { signal: AbortSignal.timeout(10000), ...init });
+  return fetch(`${base}${path}`, init);
 }
 
-function decorateTeluguSong(song, env = null) {
+function decorateTeluguSong(song) {
   if (!song?.id) return null;
   const prefixedId = prefixTeluguSongId(song.id);
-  const teluguOrigin = cleanText(env ? teluguApiOrigin(env) : "");
-  const audioUrl = teluguOrigin
-    ? `${teluguOrigin}/api/stream/${encodeURIComponent(cleanText(song.id))}`
-    : `/api/stream/${prefixedId}`;
   return {
     ...song,
     id: prefixedId,
-    audioUrl,
+    audioUrl: `/api/stream/${prefixedId}`,
   };
 }
 
 async function fetchTeluguAppState(env) {
-  if (env.TELUGU_DB) {
-    const [albumCountRow, trackCountRow, updatedRow, decadeRows] = await Promise.all([
-      env.TELUGU_DB.prepare("SELECT COUNT(*) AS count FROM albums").first(),
-      env.TELUGU_DB.prepare("SELECT COUNT(*) AS count FROM songs").first(),
-      env.TELUGU_DB.prepare("SELECT MAX(updated_at) AS updatedAt FROM songs").first(),
-      env.TELUGU_DB.prepare(
-        `
-        SELECT DISTINCT ((year / 10) * 10) AS decade
-        FROM songs
-        WHERE year > 0
-        ORDER BY decade ASC
-        `,
-      ).all(),
-    ]);
-    return {
-      summary: {
-        albumCount: Number(albumCountRow?.count || 0),
-        trackCount: Number(trackCountRow?.count || 0),
-      },
-      filters: {
-        decades: (decadeRows.results || []).map((row) => `${row.decade}s`).filter(Boolean),
-        moods: ["Imported"],
-      },
-      updatedAt: updatedRow?.updatedAt || null,
-    };
-  }
   try {
     const response = await fetchTeluguResponse(env, "/api/app-state");
     if (!response.ok) return null;
@@ -105,35 +90,26 @@ async function fetchTeluguAppState(env) {
   }
 }
 
-async function fetchTeluguLibrary(env, { query, movie, decade, offset = 0, limit = TELUGU_LIBRARY_LIMIT }) {
-  if (env.TELUGU_DB) {
-    // We can't easily call handleApi internally, so we use queryLocalLibrary but on TELUGU_DB
-    const payload = await queryLocalLibrary(env, { query, movie, decade, offset, limit }, env.TELUGU_DB);
-    return {
-      songs: (payload.songs || []).map(decorateTeluguSong),
-      total: payload.total,
-    };
-  }
-
+async function fetchTeluguLibrary(env, { query, movie, decade }) {
   if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) {
     return { songs: [], total: 0 };
   }
-
   const params = new URLSearchParams({
-    query: cleanText(query),
-    movie: cleanText(movie),
-    decade: cleanText(decade) || "all",
-    offset: String(Number(offset) || 0),
-    limit: String(Number(limit) || TELUGU_LIBRARY_LIMIT),
+    query,
+    movie,
+    decade,
+    localSongs: "false",
+    offset: "0",
+    limit: String(TELUGU_LIBRARY_LIMIT),
   });
-
   try {
     const response = await fetchTeluguResponse(env, `/api/library?${params.toString()}`);
     if (!response.ok) return { songs: [], total: 0 };
     const payload = await response.json();
+    const songs = Array.isArray(payload?.songs) ? payload.songs.map(decorateTeluguSong).filter(Boolean) : [];
     return {
-      songs: (payload.songs || []).map(decorateTeluguSong).filter(Boolean),
-      total: Number(payload.total || 0),
+      songs,
+      total: Number(payload?.total || songs.length),
     };
   } catch {
     return { songs: [], total: 0 };
@@ -142,251 +118,21 @@ async function fetchTeluguLibrary(env, { query, movie, decade, offset = 0, limit
 
 async function fetchTeluguSong(env, songId) {
   const rawId = rawTeluguSongId(songId);
-  if (!rawId) return null;
-
-  if (env.TELUGU_DB) {
-    const row = await env.TELUGU_DB.prepare(
-      `
-      SELECT id, album_url, title, artist, composer, movie, year, mood,
-             song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
-             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-      FROM songs
-      WHERE id = ?
-      `,
-    ).bind(rawId).first();
-    if (!row) return null;
-    return decorateTeluguSong(rowToSong(row), env);
-  }
-
-  if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) {
-    return null;
-  }
-
+  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !rawId) return null;
   try {
     const response = await fetchTeluguResponse(env, `/api/song?id=${encodeURIComponent(rawId)}`);
     if (!response.ok) return null;
     const payload = await response.json();
-    return decorateTeluguSong(payload, env);
+    return decorateTeluguSong(payload);
   } catch {
     return null;
   }
 }
 
-async function fetchArtworkResponse(env, request, songId) {
-  const isTelugu = isTeluguSongId(songId);
-  const language = isTelugu ? "telugu" : "tamil";
-  const song = isTelugu
-    ? await fetchTeluguSong(env, songId)
-    : await (async () => {
-        const row = await env.DB.prepare(
-          `
-          SELECT id, album_url, title, artist, composer, movie, year, mood,
-                 song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-                 remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-          FROM songs
-          WHERE id = ?
-          `,
-        ).bind(songId).first();
-        return row ? rowToSong(row) : null;
-      })();
-
-  const originalImageUrl = cleanText(song?.imageUrl || song?.image_url);
-  const candidates = [originalImageUrl];
-  const pageCandidates = await fetchPageArtworkCandidates(song);
-  candidates.push(...pageCandidates);
-  const fallbackArtwork = await fetchItunesArtworkCandidate(song, language);
-  if (fallbackArtwork) {
-    candidates.push(fallbackArtwork);
-  }
-
-  for (const rawImageUrl of candidates) {
-    const imageUrl = cleanText(rawImageUrl);
-    if (!imageUrl) continue;
-    try {
-      const referer = cleanText(song?.albumUrl || song?.sourceUrl || imageUrl);
-      const response = await fetch(imageUrl, {
-        headers: {
-          Accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-          Referer: referer,
-          Origin: originFromUrl(referer),
-          "User-Agent":
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        },
-      });
-      if (!response.ok) {
-        continue;
-      }
-      if (imageUrl !== originalImageUrl) {
-        ctxWaitUntilSafe(persistSongArtwork(env, songId, imageUrl));
-      }
-      const headers = new Headers(response.headers);
-      headers.set("Cache-Control", "public, max-age=86400");
-      return withCors(new Response(response.body, { status: response.status, headers }));
-    } catch {
-      continue;
-    }
-  }
-
-  return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", request.url), request));
-}
-
-function metadataKey(value) {
-  return cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-
-function decodeHtmlEntityText(value) {
-  return cleanText(value)
-    .replace(/&amp;/gi, "&")
-    .replace(/&#x27;|&#39;/gi, "'")
-    .replace(/&quot;/gi, '"')
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">");
-}
-
-function extractArtworkCandidatesFromHtml(html, baseUrl = SITE_ORIGIN) {
-  if (!html) return [];
-  const matches = [];
-  const patterns = [
-    /<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/gi,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/gi,
-    /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["']/gi,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["']/gi,
-    /"image"\s*:\s*"([^"]+)"/gi,
-    /(?:src|href)=["']([^"']*\/uploads\/album\/[^"']+\.(?:jpg|jpeg|png|webp))["']/gi,
-  ];
-  for (const pattern of patterns) {
-    for (const match of html.matchAll(pattern)) {
-      const candidate = absoluteUrl(decodeHtmlEntityText(match[1]), baseUrl);
-      if (!candidate) continue;
-      if (candidate.includes("/cdn-cgi/") || candidate.includes("challenges.cloudflare.com")) continue;
-      matches.push(candidate);
-    }
-  }
-  return unique(matches);
-}
-
-async function fetchPageArtworkCandidates(song) {
-  const candidates = [];
-  const pages = unique([song?.albumUrl, song?.sourceUrl, song?.songPageUrl].map(cleanText).filter(Boolean));
-  for (const pageUrl of pages) {
-    const html = await fetchText(pageUrl);
-    if (!html) continue;
-    const extracted = extractArtworkCandidatesFromHtml(html, pageUrl);
-    if (extracted.length) {
-      candidates.push(...extracted);
-      break;
-    }
-  }
-  return unique(candidates);
-}
-
-function upgradeItunesArtworkUrl(url) {
-  const text = cleanText(url);
-  if (!text) return "";
-  return text.replace(/\/\d+x\d+bb(?:-\d+)?\.(jpg|png)$/i, "/1200x1200bb.$1");
-}
-
-function scoreItunesResult(song, item, language = "tamil") {
-  const titleKey = metadataKey(song?.title);
-  const movieKey = metadataKey(song?.movie);
-  const composerKey = metadataKey(song?.composer);
-  const trackKey = metadataKey(item?.trackName || item?.collectionName);
-  const collectionKey = metadataKey(item?.collectionName);
-  const artistKey = metadataKey(item?.artistName);
-  const genreKey = metadataKey(item?.primaryGenreName);
-  let score = 0;
-  if (titleKey && trackKey === titleKey) score += 120;
-  else if (titleKey && trackKey.includes(titleKey)) score += 70;
-  if (movieKey && collectionKey === movieKey) score += 90;
-  else if (movieKey && collectionKey.includes(movieKey)) score += 60;
-  if (composerKey && artistKey.includes(composerKey)) score += 25;
-  if (genreKey === language) score += 20;
-  if (Number(item?.trackCount || 0) > 0) score += Math.min(10, Number(item.trackCount || 0));
-  return score;
-}
-
-async function fetchItunesArtworkCandidate(song, language = "tamil") {
-  const terms = [];
-  const title = cleanText(song?.title);
-  const movie = cleanText(song?.movie);
-  const composer = cleanText(song?.composer);
-  const langLabel = language.charAt(0).toUpperCase() + language.slice(1);
-
-  if (title || movie) terms.push({ entity: "song", term: [title, movie, composer, langLabel].filter(Boolean).join(" ") });
-  if (movie) terms.push({ entity: "album", term: [movie, composer, langLabel].filter(Boolean).join(" ") });
-
-  let bestUrl = "";
-  let bestScore = 0;
-  for (const { entity, term } of terms) {
-    if (!term) continue;
-    try {
-      const response = await fetch(
-        `https://itunes.apple.com/search?term=${encodeURIComponent(term)}&entity=${encodeURIComponent(entity)}&country=IN&limit=10`,
-        { headers: { Accept: "application/json" } },
-      );
-      if (!response.ok) continue;
-      const payload = await response.json();
-      for (const item of Array.isArray(payload?.results) ? payload.results : []) {
-        const artworkUrl = upgradeItunesArtworkUrl(item?.artworkUrl100 || item?.artworkUrl60);
-        if (!artworkUrl) continue;
-        const score = scoreItunesResult(song, item, language);
-        if (score > bestScore) {
-          bestScore = score;
-          bestUrl = artworkUrl;
-        }
-      }
-    } catch {
-      continue;
-    }
-  }
-  return bestScore >= 80 ? bestUrl : "";
-}
-
-function ctxWaitUntilSafe(promise) {
-  promise.catch(() => {});
-}
-
-async function persistSongArtwork(env, songId, imageUrl) {
-  const cleanSongId = cleanText(songId);
-  const updatedAt = nowIso();
-  if (isTeluguSongId(cleanSongId)) {
-    if (!env.TELUGU_DB) return;
-    await env.TELUGU_DB.prepare("UPDATE songs SET image_url = ?, updated_at = ? WHERE id = ?")
-      .bind(imageUrl, updatedAt, rawTeluguSongId(cleanSongId))
-      .run();
-    return;
-  }
-  await env.DB.prepare("UPDATE songs SET image_url = ?, updated_at = ? WHERE id = ?")
-    .bind(imageUrl, updatedAt, cleanSongId)
-    .run();
-}
-
 async function fetchTeluguSongsBatch(env, ids) {
+  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !ids.length) return [];
   const rawIds = ids.map(rawTeluguSongId).filter(Boolean);
   if (!rawIds.length) return [];
-
-  if (env.TELUGU_DB) {
-    const chunkSize = 90;
-    const songs = [];
-    for (let offset = 0; offset < rawIds.length; offset += chunkSize) {
-      const chunk = rawIds.slice(offset, offset + chunkSize);
-      const placeholders = chunk.map(() => "?").join(", ");
-      const result = await env.TELUGU_DB.prepare(
-        `
-        SELECT id, album_url, title, artist, composer, movie, year, mood,
-               song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-               remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-        FROM songs
-        WHERE id IN (${placeholders})
-        `,
-      ).bind(...chunk).all();
-      songs.push(...(result.results || []).map((row) => decorateTeluguSong(rowToSong(row), env)));
-    }
-    return songs;
-  }
-
-  if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) return [];
-
   try {
     const response = await fetchTeluguResponse(env, "/api/songs-batch", {
       method: "POST",
@@ -397,7 +143,7 @@ async function fetchTeluguSongsBatch(env, ids) {
     });
     if (!response.ok) return [];
     const payload = await response.json();
-    return (payload.songs || []).map(decorateTeluguSong).filter(Boolean);
+    return Array.isArray(payload?.songs) ? payload.songs.map(decorateTeluguSong).filter(Boolean) : [];
   } catch {
     return [];
   }
@@ -415,10 +161,13 @@ async function proxyTeluguJson(env, path, init = {}) {
 }
 
 async function proxyTeluguStream(env, request, rawId) {
-  if (!rawId) return json({ error: "Song not found." }, 404);
-  if (!env.TELUGU_SERVICE && !teluguApiOrigin(env)) return json({ error: "Telugu stream unavailable." }, 503);
+  if ((!env.TELUGU_SERVICE && !teluguApiOrigin(env)) || !rawId) return json({ error: "Song not found." }, 404);
+  const headers = new Headers();
+  const range = request.headers.get("Range");
+  if (range) headers.set("Range", range);
   const upstream = await fetchTeluguResponse(env, `/api/stream/${encodeURIComponent(rawId)}`, {
     method: "GET",
+    headers,
     redirect: "follow",
   }).catch(() => null);
   if (!upstream) return json({ error: "Upstream stream unavailable." }, 502);
@@ -595,11 +344,9 @@ function compareLibrarySongs(left, right, query, options = {}) {
   return cleanText(left?.title).toLowerCase().localeCompare(cleanText(right?.title).toLowerCase());
 }
 
-async function queryLocalLibrary(env, { query, movie, decade, offset, limit }, targetDb = null) {
-  const db = targetDb || env.DB;
+async function queryLocalLibrary(env, { query, movie, decade, offset, limit }) {
   const bindings = [];
   const filters = [
-    "link_status != 'inactive'",
     "lower(title) NOT LIKE '%verifying you are human%'",
     "lower(title) NOT LIKE '%verification successful%'",
     "lower(movie) NOT LIKE '%www.masstamilan.dev%'",
@@ -667,17 +414,17 @@ async function queryLocalLibrary(env, { query, movie, decade, offset, limit }, t
     lower(title) ASC
   `;
 
-  const countStmt = db.prepare(`SELECT COUNT(*) AS count FROM songs ${whereClause}`).bind(...bindings);
+  const countStmt = env.DB.prepare(`SELECT COUNT(*) AS count FROM songs ${whereClause}`).bind(...bindings);
   const rankBindings = query
     ? [query, `${query}%`, query, `${query}%`, query, `${query}%`, query, `${query}%`, query, query, query, query]
     : [];
   const rowsBindings = homepage
     ? [...bindings, homepageRecentCutoffIso(), homepageRecentCutoffIso(), limit, offset]
     : [...bindings, ...rankBindings, limit, offset];
-  const rowsStmt = db.prepare(
+  const rowsStmt = env.DB.prepare(
     `
     SELECT id, album_url, title, artist, composer, movie, year, mood,
-           song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+           song_page_url, source_url, image_url, audio_128_url, audio_320_url,
            remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status, updated_at
     FROM songs
     ${whereClause}
@@ -731,13 +478,13 @@ async function handleApi(request, env, url, ctx) {
   if (url.pathname === "/api/app-state") {
     const [albumCountRow, trackCountRow, updatedRow, decadeRows, teluguState] = await Promise.all([
       env.DB.prepare("SELECT COUNT(*) AS count FROM albums").first(),
-      env.DB.prepare("SELECT COUNT(*) AS count FROM songs WHERE link_status != 'inactive'").first(),
-      env.DB.prepare("SELECT MAX(updated_at) AS updatedAt FROM songs WHERE link_status != 'inactive'").first(),
+      env.DB.prepare("SELECT COUNT(*) AS count FROM songs").first(),
+      env.DB.prepare("SELECT MAX(updated_at) AS updatedAt FROM songs").first(),
       env.DB.prepare(
         `
         SELECT DISTINCT ((year / 10) * 10) AS decade
         FROM songs
-        WHERE year > 0 AND link_status != 'inactive'
+        WHERE year > 0
         ORDER BY decade ASC
         `,
       ).all(),
@@ -878,14 +625,6 @@ async function handleApi(request, env, url, ctx) {
     return json(rowToSong(row));
   }
 
-  if (url.pathname === "/api/artwork") {
-    const songId = cleanText(url.searchParams.get("id"));
-    if (!songId) {
-      return env.ASSETS.fetch(new Request(new URL("/Sruthi_kutty.jpg", url), request));
-    }
-    return fetchArtworkResponse(env, request, songId);
-  }
-
   if (url.pathname === "/api/songs-batch" && request.method === "POST") {
     const payload = await request.json().catch(() => ({}));
     const ids = Array.isArray(payload?.ids) ? [...new Set(payload.ids.map(cleanText).filter(Boolean))].slice(0, 1200) : [];
@@ -921,11 +660,13 @@ async function handleApi(request, env, url, ctx) {
   }
 
   if (url.pathname === "/api/playlists") {
+    await ensureOfficialPlaylistTables(env);
     const playlists = await listOfficialPlaylists(env, { includeSongIds: false });
     return json({ playlists });
   }
 
   if (url.pathname === "/api/playlist") {
+    await ensureOfficialPlaylistTables(env);
     const playlistId = cleanText(url.searchParams.get("id"));
     if (!playlistId) return json({ error: "Playlist id is required." }, 400);
     const playlist = await loadOfficialPlaylistDetail(env, playlistId);
@@ -981,7 +722,7 @@ async function handleApi(request, env, url, ctx) {
     const rows = await env.DB.prepare(
       `
       SELECT id, album_url, title, artist, composer, movie, year, mood,
-             song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
              remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
       FROM songs
       ORDER BY year DESC, lower(title) ASC
@@ -1005,7 +746,7 @@ async function handleApi(request, env, url, ctx) {
       const rows = await env.DB.prepare(
         `
         SELECT id, album_url, title, artist, composer, movie, year, mood,
-               song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+               song_page_url, source_url, image_url, audio_128_url, audio_320_url,
                remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
         FROM songs
         WHERE id IN (${placeholders})
@@ -1036,7 +777,7 @@ async function handleApi(request, env, url, ctx) {
     const rows = await env.DB.prepare(
       `
       SELECT id, album_url, title, artist, composer, movie, year, mood,
-             song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
              remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
       FROM songs
       WHERE album_url = ?
@@ -1050,6 +791,9 @@ async function handleApi(request, env, url, ctx) {
 
   if (url.pathname.startsWith("/api/stream/")) {
     const songId = cleanText(url.pathname.split("/").pop());
+    if (isTeluguSongId(songId)) {
+      return proxyTeluguStream(env, request, rawTeluguSongId(songId));
+    }
     return handleStream(songId, request, env, ctx);
   }
 
@@ -1063,51 +807,10 @@ async function handleStream(songId, request, env, ctx) {
     if (cached) return withCors(cached);
   }
 
-  if (isTeluguSongId(songId)) {
-    const rawId = rawTeluguSongId(songId);
-    if ((env.TELUGU_SERVICE || teluguApiOrigin(env)) && rawId) {
-      return proxyTeluguStream(env, request, rawId);
-    }
-    if (env.TELUGU_DB && rawId) {
-      let row = await env.TELUGU_DB.prepare(
-        `
-        SELECT id, album_url, title, artist, composer, movie, year, mood,
-               song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
-               remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-        FROM songs
-        WHERE id = ?
-        `,
-      ).bind(rawId).first();
-      if (row) {
-        let response = await tryAudioCandidates(row, request, true);
-        if (response && !range) {
-          ctx?.waitUntil(caches.default.put(request, response.clone()));
-        }
-        if (response) return response;
-
-        const refreshed = await tryRefreshSongLink(env, row, env.TELUGU_DB);
-        if (refreshed) {
-          row = refreshed;
-          response = await tryAudioCandidates(row, request, true);
-          if (response && !range) {
-            ctx?.waitUntil(caches.default.put(request, response.clone()));
-          }
-          if (response) return response;
-        }
-      }
-    }
-    return proxyTeluguStream(env, request, rawId);
-  }
-
-  const db = env.DB;
-  if (!db) {
-    return json({ error: "Upstream stream unavailable." }, 502);
-  }
-
-  let row = await db.prepare(
+  let row = await env.DB.prepare(
     `
     SELECT id, album_url, title, artist, composer, movie, year, mood,
-           song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+           song_page_url, source_url, image_url, audio_128_url, audio_320_url,
            remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
     FROM songs
     WHERE id = ?
@@ -1116,189 +819,70 @@ async function handleStream(songId, request, env, ctx) {
 
   if (!row) return json({ error: "Song not found." }, 404);
 
-  // Start fresh-token fetch in parallel so it's ready if stored token fails
-  const freshUrlPromise = fetchFreshAudioUrl(row);
-
-  let response = await tryAudioCandidates(row, request, false);
-  if (response) {
-    if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
-    return response;
+  let response = await tryAudioCandidates(row, request);
+  if (response && !range) {
+    ctx?.waitUntil(caches.default.put(request, response.clone()));
   }
+  if (response) return response;
 
-  // Stored token failed — use fresh URL already being fetched in parallel
-  const freshUrl = await freshUrlPromise;
-  if (freshUrl) {
-    const freshRow = {
-      ...row,
-      audio_url: freshUrl,
-      audio_320_url: freshUrl,
-      audio_128_url: freshUrl.replace("/p320_cdn/", "/p128_cdn/"),
-      remote_audio_320_url: freshUrl,
-      remote_audio_128_url: freshUrl.replace("/p320_cdn/", "/p128_cdn/"),
-    };
-    response = await tryAudioCandidates(freshRow, request, false);
-    if (response) {
-      if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
-      ctx?.waitUntil(tryRefreshSongLink(env, row));
-      return response;
-    }
-  }
-
-  // Last resort: full refresh (writes to D1 for next time)
   const refreshed = await tryRefreshSongLink(env, row);
   if (refreshed) {
-    response = await tryAudioCandidates(refreshed, request, false);
-    if (response) {
-      if (!range) ctx?.waitUntil(caches.default.put(request, response.clone()));
-      return response;
+    row = refreshed;
+    response = await tryAudioCandidates(row, request);
+    if (response && !range) {
+      ctx?.waitUntil(caches.default.put(request, response.clone()));
     }
+    if (response) return response;
   }
 
-  return json({ error: "Stream currently unavailable. Please try again later." }, 503);
+  return json({ error: "Upstream stream unavailable." }, 502);
 }
 
-async function tryAudioCandidates(row, request, isTelugu = false) {
+async function tryAudioCandidates(row, request) {
   const range = request.headers.get("Range");
-  const defaultBase = isTelugu ? TELUGU_SITE_ORIGIN : SITE_ORIGIN;
-  const baseUrl = cleanText(row.album_url || row.song_page_url || row.source_url || defaultBase);
-  // album_url first — it's the most reliable referer for MassTamilan's CDN
-  const referers = unique([
-    absoluteUrl(row.album_url, defaultBase),
-    absoluteUrl(row.song_page_url, defaultBase),
-    absoluteUrl(row.source_url, defaultBase),
-    absoluteUrl(baseUrl, defaultBase),
-  ].filter(Boolean));
-  const seen = new Set();
-  // 320kbps first (audio_url is always 320), then 128 as fallback
-  const candidates = [
-    row.audio_url,
-    row.audio_320_url,
-    row.remote_audio_320_url,
-    row.audio_128_url,
-    row.remote_audio_128_url,
-  ].filter(Boolean);
-
-  // Fast path: try the best candidate with the best referer first
-  const fastTarget = absoluteUrl(candidates[0], baseUrl);
-  if (fastTarget) {
-    seen.add(fastTarget);
-    const quick = await fetchAudio(fastTarget, referers[0], range);
-    if (quick) return quick;
-  }
-
-  // Full fallback: try all remaining candidates × all referers
-  for (const candidate of candidates) {
+  const baseUrl = cleanText(row.album_url || row.song_page_url || row.source_url);
+  for (const candidate of [row.audio_128_url, row.audio_320_url]) {
     const target = absoluteUrl(candidate, baseUrl);
-    if (!target || seen.has(target)) continue;
-    seen.add(target);
-    for (const referer of referers) {
-      const upstream = await fetchAudio(target, referer, range);
-      if (upstream) return upstream;
-    }
+    if (!target) continue;
+    const upstream = await fetchAudio(target, row.album_url, range);
+    if (upstream) return upstream;
   }
   return null;
 }
 
 async function fetchAudio(target, albumUrl, rangeHeader) {
-  const referer = cleanText(albumUrl) || SITE_ORIGIN;
-  const retryableStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
-  const rangeModes = rangeHeader ? [rangeHeader, ""] : [""];
+  const headers = new Headers({
+    Accept: "audio/mpeg,audio/*;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    Referer: cleanText(albumUrl) || SITE_ORIGIN,
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+  });
+  if (rangeHeader) headers.set("Range", rangeHeader);
 
-  for (const requestedRange of rangeModes) {
-    const maxAttempts = requestedRange ? 1 : 2;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const headers = new Headers({
-        Accept: "audio/mpeg,audio/*;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        Referer: referer,
-        Origin: originFromUrl(referer, SITE_ORIGIN),
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      });
-      if (requestedRange) headers.set("Range", requestedRange);
+  const response = await fetch(target, {
+    method: "GET",
+    headers,
+    redirect: "follow",
+  });
 
-      const controller = new AbortController();
-      const connectTimeout = setTimeout(() => controller.abort(), 10000);
-      let response;
-      try {
-        response = await fetch(target, {
-          method: "GET",
-          headers,
-          redirect: "follow",
-          signal: controller.signal,
-        });
-      } catch {
-        response = null;
-      } finally {
-        clearTimeout(connectTimeout);
-      }
+  const contentType = (response.headers.get("content-type") || "").toLowerCase();
+  if (!response.ok) return null;
+  if (contentType.includes("text/html") || contentType.includes("text/plain")) return null;
 
-      if (!response) {
-        if (attempt < maxAttempts) await sleep(300 * attempt);
-        continue;
-      }
-
-      const contentType = (response.headers.get("content-type") || "").toLowerCase();
-      if (response.ok && !contentType.includes("text/html") && !contentType.includes("text/plain")) {
-        const outHeaders = new Headers(corsHeaders());
-        outHeaders.set("Content-Type", response.headers.get("content-type") || "audio/mpeg");
-        if (response.headers.get("content-length")) outHeaders.set("Content-Length", response.headers.get("content-length"));
-        if (response.headers.get("content-range")) outHeaders.set("Content-Range", response.headers.get("content-range"));
-        outHeaders.set("Accept-Ranges", response.headers.get("accept-ranges") || "bytes");
-        if (!requestedRange) outHeaders.set("Cache-Control", "public, max-age=3600");
-        return new Response(response.body, {
-          status: response.status,
-          headers: outHeaders,
-        });
-      }
-
-      // 4xx errors (except retryable ones like 429) are permanent — don't retry
-      if (response.status >= 400 && response.status < 500 && !retryableStatuses.has(response.status)) {
-        break;
-      }
-      if (!retryableStatuses.has(response.status) && !contentType.includes("text/html")) {
-        break;
-      }
-
-      if (attempt < maxAttempts) {
-        const retryAfter = Math.max(0, toInt(response.headers.get("retry-after"), 0));
-        const waitMs = retryAfter > 0 ? Math.min(retryAfter, 1) * 1000 : 350 * attempt;
-        await sleep(waitMs);
-      }
-    }
-  }
-
-  return null;
+  const outHeaders = new Headers(corsHeaders());
+  outHeaders.set("Content-Type", response.headers.get("content-type") || "audio/mpeg");
+  if (response.headers.get("content-length")) outHeaders.set("Content-Length", response.headers.get("content-length"));
+  if (response.headers.get("content-range")) outHeaders.set("Content-Range", response.headers.get("content-range"));
+  outHeaders.set("Accept-Ranges", response.headers.get("accept-ranges") || "bytes");
+  if (!rangeHeader) outHeaders.set("Cache-Control", "public, max-age=3600");
+  return new Response(response.body, {
+    status: response.status,
+    headers: outHeaders,
+  });
 }
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function fetchFreshAudioUrl(row) {
-  const albumUrl = cleanText(row.album_url);
-  if (!albumUrl) return null;
-  const html = await fetchText(albumUrl);
-  if (!html || !html.includes("window.albumTracks")) return null;
-  const tracks = extractAlbumTracks(html);
-  if (!tracks.length) return null;
-  const songPageUrl = cleanText(row.song_page_url);
-  const songId = cleanText(row.id);
-  const track =
-    (songPageUrl && tracks.find(t => cleanText(t.songPageUrl) === songPageUrl)) ||
-    tracks.find(t => String(t.id) === songId);
-  if (!track) return null;
-  const dl = cleanText(track.dl_path);
-  if (!dl) return null;
-  return dl.includes("/p320_cdn/") ? dl : dl.includes("/p128_cdn/") ? dl.replace("/p128_cdn/", "/p320_cdn/") : dl;
-}
-
-async function tryRefreshSongLink(env, row, dbOverride = null) {
-  if (!row?.id) return null;
-  const db = dbOverride || env.DB;
-  const rawId = row.id;
-  if (!db) return null;
-
+async function tryRefreshSongLink(env, row) {
   const candidatePages = unique([row.album_url, row.song_page_url, row.source_url].map(cleanText).filter(Boolean));
   for (const candidate of candidatePages) {
     const pageHtml = await fetchText(candidate);
@@ -1313,19 +897,17 @@ async function tryRefreshSongLink(env, row, dbOverride = null) {
       if (!albumHtml || !albumHtml.includes("window.albumTracks")) continue;
     }
 
-    // We call refreshAlbum with the appropriate DB binding.
-    const refreshed = await refreshAlbum(env, albumUrl, albumHtml, db);
+    const refreshed = await refreshAlbum(env, albumUrl, albumHtml);
     if (!refreshed) continue;
-    
-    return db.prepare(
+    return env.DB.prepare(
       `
       SELECT id, album_url, title, artist, composer, movie, year, mood,
-             song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
              remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
       FROM songs
       WHERE id = ?
       `,
-    ).bind(rawId).first();
+    ).bind(row.id).first();
   }
   return null;
 }
@@ -1347,6 +929,7 @@ async function runScheduledSync(env) {
   try {
     const payload = await fetchSyncFeed(feedUrl);
     const albums = normalizeSyncPayload(payload);
+    const playlists = normalizeSyncPlaylists(payload);
     let songsSeen = 0;
     for (const album of albums) {
       songsSeen += album.songs.length;
@@ -1357,6 +940,11 @@ async function runScheduledSync(env) {
       for (const song of album.songs) {
         await upsertSong(env, song);
       }
+    }
+
+    await ensureOfficialPlaylistTables(env);
+    for (const playlist of playlists) {
+      await upsertOfficialPlaylist(env, playlist);
     }
 
     const finishedAt = nowIso();
@@ -1414,36 +1002,26 @@ async function ensureOfficialPlaylistTables(env) {
   await env.DB.batch([
     env.DB.prepare(
       `
-      CREATE TABLE IF NOT EXISTS playlists (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+      CREATE TABLE IF NOT EXISTS official_playlists (
+        id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
-        slug TEXT NOT NULL UNIQUE,
-        description TEXT,
-        category TEXT NOT NULL,
-        cover_url TEXT,
-        tags TEXT,
-        is_featured INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        source_url TEXT,
+        updated_at TEXT NOT NULL,
+        song_count INTEGER NOT NULL DEFAULT 0
       )
       `,
     ),
     env.DB.prepare(
       `
-      CREATE TABLE IF NOT EXISTS playlist_items (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        playlist_id INTEGER NOT NULL,
+      CREATE TABLE IF NOT EXISTS official_playlist_songs (
+        playlist_id TEXT NOT NULL,
         song_id TEXT NOT NULL,
-        position INTEGER NOT NULL,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(playlist_id, song_id),
-        FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
-        FOREIGN KEY (song_id) REFERENCES songs(id) ON DELETE CASCADE
+        position INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playlist_id, song_id)
       )
       `,
     ),
-    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_playlist_items_playlist_id ON playlist_items(playlist_id)"),
-    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_playlist_items_song_id ON playlist_items(song_id)"),
+    env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_official_playlist_songs_playlist ON official_playlist_songs(playlist_id, position)"),
   ]);
 }
 
@@ -1480,7 +1058,7 @@ function normalizeSyncPayload(payload) {
 }
 
 function normalizeSyncPlaylists(payload) {
-  const playlists = [];
+  const playlists = Array.isArray(payload?.playlists) ? payload.playlists : [];
   return playlists
     .map((playlist) => normalizePlaylist(playlist))
     .filter((playlist) => playlist.id && playlist.name);
@@ -1574,11 +1152,6 @@ function normalizePlaylist(playlist) {
   return {
     id: cleanText(playlist?.id) || slugValue(playlist?.name),
     name: cleanText(playlist?.name || playlist?.title),
-    description: cleanText(playlist?.description),
-    category: cleanText(playlist?.category) || "Imported",
-    coverUrl: absoluteUrl(playlist?.coverUrl || playlist?.cover_url || playlist?.imageUrl),
-    tags: cleanText(playlist?.tags),
-    isFeatured: Boolean(playlist?.isFeatured || playlist?.is_featured),
     sourceUrl: absoluteUrl(playlist?.sourceUrl || playlist?.url),
     updatedAt: cleanText(playlist?.updatedAt) || nowIso(),
     songRefs,
@@ -1639,14 +1212,14 @@ async function upsertSong(env, song) {
       movie = excluded.movie,
       year = excluded.year,
       mood = excluded.mood,
-      song_page_url = COALESCE(NULLIF(excluded.song_page_url, ''), song_page_url),
-      source_url = COALESCE(NULLIF(excluded.source_url, ''), source_url),
-      image_url = COALESCE(NULLIF(excluded.image_url, ''), image_url),
-      audio_url = COALESCE(NULLIF(excluded.audio_url, ''), audio_url),
-      audio_128_url = COALESCE(NULLIF(excluded.audio_128_url, ''), audio_128_url),
-      audio_320_url = COALESCE(NULLIF(excluded.audio_320_url, ''), audio_320_url),
-      remote_audio_128_url = COALESCE(NULLIF(excluded.remote_audio_128_url, ''), remote_audio_128_url),
-      remote_audio_320_url = COALESCE(NULLIF(excluded.remote_audio_320_url, ''), remote_audio_320_url),
+      song_page_url = excluded.song_page_url,
+      source_url = excluded.source_url,
+      image_url = excluded.image_url,
+      audio_url = excluded.audio_url,
+      audio_128_url = excluded.audio_128_url,
+      audio_320_url = excluded.audio_320_url,
+      remote_audio_128_url = excluded.remote_audio_128_url,
+      remote_audio_320_url = excluded.remote_audio_320_url,
       local_audio_128_url = excluded.local_audio_128_url,
       local_audio_320_url = excluded.local_audio_320_url,
       download_links_json = excluded.download_links_json,
@@ -1685,186 +1258,121 @@ async function upsertSong(env, song) {
 
 async function upsertOfficialPlaylist(env, playlist) {
   const resolvedSongIds = await resolvePlaylistSongIds(env, playlist.songRefs || []);
-  const slug = cleanText(playlist.id || slugValue(playlist.name));
-  const now = cleanText(playlist.updatedAt) || nowIso();
-  const existing = await env.DB.prepare(
+  await env.DB.prepare(
     `
-    SELECT id
-    FROM playlists
-    WHERE slug = ?
-    LIMIT 1
+    INSERT INTO official_playlists (id, name, source_url, updated_at, song_count)
+    VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      source_url = excluded.source_url,
+      updated_at = excluded.updated_at,
+      song_count = excluded.song_count
     `,
-  ).bind(slug).first();
+  ).bind(
+    playlist.id,
+    playlist.name,
+    playlist.sourceUrl,
+    playlist.updatedAt,
+    resolvedSongIds.length,
+  ).run();
 
-  let playlistDbId = Number(existing?.id || 0);
-  if (playlistDbId) {
-    await env.DB.prepare(
-      `
-      UPDATE playlists
-      SET name = ?, description = ?, category = ?, cover_url = ?, tags = ?, is_featured = ?, updated_at = ?
-      WHERE id = ?
-      `,
-    ).bind(
-      playlist.name,
-      cleanText(playlist.description),
-      cleanText(playlist.category) || "Imported",
-      cleanText(playlist.coverUrl),
-      cleanText(playlist.tags),
-      Number(playlist.isFeatured ? 1 : 0),
-      now,
-      playlistDbId,
-    ).run();
-  } else {
-    const insert = await env.DB.prepare(
-      `
-      INSERT INTO playlists (
-        name, slug, description, category, cover_url, tags, is_featured, created_at, updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-    ).bind(
-      playlist.name,
-      slug,
-      cleanText(playlist.description),
-      cleanText(playlist.category) || "Imported",
-      cleanText(playlist.coverUrl),
-      cleanText(playlist.tags),
-      Number(playlist.isFeatured ? 1 : 0),
-      now,
-      now,
-    ).run();
-    playlistDbId = Number(insert.meta?.last_row_id || 0);
-  }
-
-  if (!playlistDbId) return;
-
-  if (!resolvedSongIds.length) return;
-  const existingRows = await env.DB.prepare(
-    `
-    SELECT song_id
-    FROM playlist_items
-    WHERE playlist_id = ?
-    `,
-  ).bind(playlistDbId).all();
-  const existingSongIds = new Set((existingRows.results || []).map((row) => cleanText(row.song_id)).filter(Boolean));
-  const previousCount = existingSongIds.size;
-  let remainingNewSlots = Math.max(0, 100 - previousCount);
+  await env.DB.prepare("DELETE FROM official_playlist_songs WHERE playlist_id = ?").bind(playlist.id).run();
   const statements = resolvedSongIds.map((songId, index) =>
     env.DB.prepare(
       `
-      INSERT INTO playlist_items (playlist_id, song_id, position, created_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(playlist_id, song_id) DO UPDATE SET
-        position = excluded.position
+      INSERT OR REPLACE INTO official_playlist_songs (playlist_id, song_id, position)
+      VALUES (?, ?, ?)
       `,
-    ).bind(playlistDbId, songId, index + 1, now)
-  ).filter((statement, index) => {
-    const songId = resolvedSongIds[index];
-    if (existingSongIds.has(songId)) return true;
-    if (remainingNewSlots <= 0) return false;
-    remainingNewSlots -= 1;
-    return true;
-  });
-  if (!statements.length) return;
-  await db.batch(statements);
+    ).bind(playlist.id, songId, index),
+  );
+  if (statements.length) {
+    await env.DB.batch(statements);
+  }
 }
 
 async function listOfficialPlaylists(env, { includeSongIds = true } = {}) {
-  await ensureOfficialPlaylistTables(env);
   const rows = await env.DB.prepare(
     `
-    SELECT
-      p.id,
-      p.name,
-      p.slug,
-      p.description,
-      p.category,
-      p.cover_url,
-      p.tags,
-      p.is_featured,
-      p.created_at,
-      p.updated_at,
-      COUNT(pi.song_id) AS song_count
-    FROM playlists p
-    LEFT JOIN playlist_items pi ON pi.playlist_id = p.id
-    GROUP BY
-      p.id, p.name, p.slug, p.description, p.category, p.cover_url,
-      p.tags, p.is_featured, p.created_at, p.updated_at
-    ORDER BY
-      CASE WHEN lower(p.slug) = 'vijay-hits' THEN 0 ELSE 1 END ASC,
-      lower(p.category) ASC,
-      lower(p.name) ASC
+    SELECT id, name, source_url, updated_at, song_count
+    FROM official_playlists
+    ORDER BY lower(name) ASC
     `,
   ).all();
-  const results = rows.results || [];
+  const defaults = defaultOfficialPlaylists(env);
+  const results = (rows.results || []).length ? (rows.results || []) : defaults.map((playlist) => ({
+    id: playlist.id,
+    name: playlist.name,
+    source_url: playlist.sourceUrl,
+    updated_at: null,
+    song_count: 0,
+  }));
   const playlists = [];
   for (const row of results) {
-    const songIds = includeSongIds ? await officialPlaylistSongIds(env, row.slug) : [];
+    let songIds = [];
+    let songCount = Number(row.song_count || 0);
+    if (includeSongIds) {
+      songIds = await officialPlaylistSongIds(env, row.id, cleanText(row.name));
+      songCount = songIds.length;
+    } else if (!songCount) {
+      songCount = (await derivePlaylistSongIdsFromName(env, cleanText(row.name))).length;
+    }
     playlists.push({
-      id: cleanText(row.slug),
+      id: row.id,
       name: cleanText(row.name),
-      description: cleanText(row.description),
-      category: cleanText(row.category),
-      coverUrl: cleanText(row.cover_url),
-      tags: cleanText(row.tags),
-      isFeatured: Number(row.is_featured || 0),
-      createdAt: cleanText(row.created_at),
-      updatedAt: cleanText(row.updated_at),
+      sourceUrl: cleanText(row.source_url),
+      updatedAt: row.updated_at || null,
       songIds,
-      songCount: includeSongIds ? songIds.length : Number(row.song_count || 0),
+      songCount,
       official: true,
     });
   }
   return playlists;
 }
 
-async function officialPlaylistSongIds(env, playlistSlug) {
+async function officialPlaylistSongIds(env, playlistId, playlistName = "") {
   const songs = await env.DB.prepare(
     `
-    SELECT pi.song_id
-    FROM playlist_items pi
-    JOIN playlists p ON p.id = pi.playlist_id
-    WHERE p.slug = ?
-    ORDER BY pi.position ASC, pi.song_id ASC
+    SELECT song_id
+    FROM official_playlist_songs
+    WHERE playlist_id = ?
+    ORDER BY position ASC, song_id ASC
     `,
-  ).bind(playlistSlug).all();
-  return (songs.results || []).map((item) => cleanText(item.song_id)).filter(Boolean);
+  ).bind(playlistId).all();
+  let songIds = (songs.results || []).map((item) => cleanText(item.song_id)).filter(Boolean);
+  if (!songIds.length) {
+    songIds = await derivePlaylistSongIdsFromName(env, cleanText(playlistName));
+  }
+  return songIds;
 }
 
 async function loadOfficialPlaylistDetail(env, playlistId) {
-  await ensureOfficialPlaylistTables(env);
-  const row = await env.DB.prepare(
+  let row = await env.DB.prepare(
     `
-    SELECT
-      id,
-      name,
-      slug,
-      description,
-      category,
-      cover_url,
-      tags,
-      is_featured,
-      created_at,
-      updated_at
-    FROM playlists
-    WHERE slug = ?
+    SELECT id, name, source_url, updated_at, song_count
+    FROM official_playlists
+    WHERE id = ?
     LIMIT 1
     `,
   ).bind(playlistId).first();
-  if (!row) return null;
+  if (!row) {
+    const fallback = defaultOfficialPlaylists(env).find((playlist) => playlist.id === playlistId);
+    if (!fallback) return null;
+    row = {
+      id: fallback.id,
+      name: fallback.name,
+      source_url: fallback.sourceUrl,
+      updated_at: null,
+      song_count: 0,
+    };
+  }
 
-  const songIds = await officialPlaylistSongIds(env, cleanText(row.slug));
+  const songIds = await officialPlaylistSongIds(env, playlistId, cleanText(row.name));
   const songs = await loadSongsByIds(env, songIds);
   return {
-    id: cleanText(row.slug),
+    id: row.id,
     name: cleanText(row.name),
-    description: cleanText(row.description),
-    category: cleanText(row.category),
-    coverUrl: cleanText(row.cover_url),
-    tags: cleanText(row.tags),
-    isFeatured: Number(row.is_featured || 0),
-    createdAt: cleanText(row.created_at),
-    updatedAt: cleanText(row.updated_at),
+    sourceUrl: cleanText(row.source_url),
+    updatedAt: row.updated_at || null,
     songCount: songIds.length,
     songIds: songs.map((song) => song.id),
     songs,
@@ -1875,56 +1383,23 @@ async function loadOfficialPlaylistDetail(env, playlistId) {
 async function loadSongsByIds(env, ids) {
   const uniqueIds = [...new Set((ids || []).map(cleanText).filter(Boolean))];
   if (!uniqueIds.length) return [];
-
-  const tamilIds = uniqueIds.filter(id => !isTeluguSongId(id));
-  const teluguIds = uniqueIds.filter(id => isTeluguSongId(id));
-  const byId = new Map();
-
-  if (tamilIds.length) {
-    const chunkSize = 90;
-    for (let offset = 0; offset < tamilIds.length; offset += chunkSize) {
-      const chunk = tamilIds.slice(offset, offset + chunkSize);
-      const placeholders = chunk.map(() => "?").join(", ");
-      const result = await env.DB.prepare(
-        `
-        SELECT id, album_url, title, artist, composer, movie, year, mood,
-               song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-               remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-        FROM songs
-        WHERE id IN (${placeholders})
-        `,
-      ).bind(...chunk).all();
-      (result.results || []).forEach(row => byId.set(cleanText(row.id), rowToSong(row)));
-    }
+  const chunkSize = 90;
+  const rows = [];
+  for (let offset = 0; offset < uniqueIds.length; offset += chunkSize) {
+    const chunk = uniqueIds.slice(offset, offset + chunkSize);
+    const placeholders = chunk.map(() => "?").join(", ");
+    const result = await env.DB.prepare(
+      `
+      SELECT id, album_url, title, artist, composer, movie, year, mood,
+             song_page_url, source_url, image_url, audio_128_url, audio_320_url,
+             remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
+      FROM songs
+      WHERE id IN (${placeholders})
+      `,
+    ).bind(...chunk).all();
+    rows.push(...(result.results || []));
   }
-
-  if (teluguIds.length) {
-    if (env.TELUGU_DB) {
-      const rawIds = teluguIds.map(rawTeluguSongId).filter(Boolean);
-      const chunkSize = 90;
-      for (let offset = 0; offset < rawIds.length; offset += chunkSize) {
-        const chunk = rawIds.slice(offset, offset + chunkSize);
-        const placeholders = chunk.map(() => "?").join(", ");
-        const result = await env.TELUGU_DB.prepare(
-          `
-          SELECT id, album_url, title, artist, composer, movie, year, mood,
-                 song_page_url, source_url, image_url, audio_128_url, audio_320_url,
-                 remote_audio_128_url, remote_audio_320_url, last_refreshed_at, link_status
-          FROM songs
-          WHERE id IN (${placeholders})
-          `,
-        ).bind(...chunk).all();
-        (result.results || []).forEach(row => {
-          const song = decorateTeluguSong(rowToSong(row), env);
-          if (song) byId.set(song.id, song);
-        });
-      }
-    } else {
-      const teluguSongs = await fetchTeluguSongsBatch(env, teluguIds);
-      teluguSongs.forEach(song => byId.set(song.id, song));
-    }
-  }
-
+  const byId = new Map(rows.map((item) => [cleanText(item.id), rowToSong(item)]));
   return uniqueIds.map((id) => byId.get(id)).filter(Boolean);
 }
 
@@ -2038,30 +1513,9 @@ async function resolvePlaylistSongId(env, ref) {
   return "";
 }
 
-async function refreshAlbum(env, albumUrl, html, dbOverride = null) {
-  const db = dbOverride || env.DB;
+async function refreshAlbum(env, albumUrl, html) {
   const albumTracks = extractAlbumTracks(html);
   if (!albumTracks.length) return false;
-  const existingRows = await db.prepare(
-    `
-    SELECT id, title, song_page_url
-    FROM songs
-    WHERE album_url = ?
-    `,
-  ).bind(albumUrl).all();
-  const existingByPageUrl = new Map();
-  const existingByTitleKey = new Map();
-  for (const row of existingRows.results || []) {
-    const pageUrl = cleanText(row.song_page_url);
-    if (pageUrl && pageUrl !== albumUrl && !existingByPageUrl.has(pageUrl)) {
-      existingByPageUrl.set(pageUrl, row);
-    }
-    const titleKey = songIdentityKey(row.title);
-    if (!titleKey) continue;
-    const bucket = existingByTitleKey.get(titleKey) || [];
-    bucket.push(row);
-    existingByTitleKey.set(titleKey, bucket);
-  }
 
   const albumTitle = parseAlbumTitle(html) || "Untitled album";
   const year = parseYear(html, albumUrl);
@@ -2070,23 +1524,13 @@ async function refreshAlbum(env, albumUrl, html, dbOverride = null) {
 
   const statements = [];
   statements.push(
-    db.prepare(
+    env.DB.prepare("DELETE FROM songs WHERE album_url = ?").bind(albumUrl),
+    env.DB.prepare(
       `
-      INSERT INTO albums (
+      INSERT OR REPLACE INTO albums (
         url, title, page_number, year, music_director, director, starring, lyricists,
         zip_links_json, track_count, updated_at
       ) VALUES (?, ?, 0, ?, ?, '', '', '', '[]', ?, ?)
-      ON CONFLICT(url) DO UPDATE SET
-        title = excluded.title,
-        page_number = excluded.page_number,
-        year = excluded.year,
-        music_director = excluded.music_director,
-        director = excluded.director,
-        starring = excluded.starring,
-        lyricists = excluded.lyricists,
-        zip_links_json = excluded.zip_links_json,
-        track_count = excluded.track_count,
-        updated_at = excluded.updated_at
       `,
     ).bind(albumUrl, albumTitle, year, composer, albumTracks.length, updatedAt),
   );
@@ -2098,42 +1542,16 @@ async function refreshAlbum(env, albumUrl, html, dbOverride = null) {
       composer,
       year,
       updatedAt,
-      existingByPageUrl,
-      existingByTitleKey,
     });
     statements.push(
-      db.prepare(
+      env.DB.prepare(
         `
-        INSERT INTO songs (
+        INSERT OR REPLACE INTO songs (
           id, album_url, title, artist, singers, composer, movie, year, mood,
           song_page_url, source_url, image_url, audio_url, audio_128_url, audio_320_url,
           remote_audio_128_url, remote_audio_320_url, local_audio_128_url, local_audio_320_url,
           download_links_json, spotify_json, last_refreshed_at, link_status, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Imported', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, '{}', ?, 'fresh', ?)
-        ON CONFLICT(id) DO UPDATE SET
-          album_url = excluded.album_url,
-          title = excluded.title,
-          artist = excluded.artist,
-          singers = excluded.singers,
-          composer = excluded.composer,
-          movie = excluded.movie,
-          year = excluded.year,
-          mood = excluded.mood,
-          song_page_url = COALESCE(NULLIF(excluded.song_page_url, ''), song_page_url),
-          source_url = COALESCE(NULLIF(excluded.source_url, ''), source_url),
-          image_url = COALESCE(NULLIF(excluded.image_url, ''), image_url),
-          audio_url = COALESCE(NULLIF(excluded.audio_url, ''), audio_url),
-          audio_128_url = COALESCE(NULLIF(excluded.audio_128_url, ''), audio_128_url),
-          audio_320_url = COALESCE(NULLIF(excluded.audio_320_url, ''), audio_320_url),
-          remote_audio_128_url = COALESCE(NULLIF(excluded.remote_audio_128_url, ''), remote_audio_128_url),
-          remote_audio_320_url = COALESCE(NULLIF(excluded.remote_audio_320_url, ''), remote_audio_320_url),
-          local_audio_128_url = excluded.local_audio_128_url,
-          local_audio_320_url = excluded.local_audio_320_url,
-          download_links_json = excluded.download_links_json,
-          spotify_json = excluded.spotify_json,
-          last_refreshed_at = excluded.last_refreshed_at,
-          link_status = 'fresh',
-          updated_at = excluded.updated_at
         `,
       ).bind(
         payload.id,
@@ -2159,36 +1577,10 @@ async function refreshAlbum(env, albumUrl, html, dbOverride = null) {
     );
   }
 
-  const refreshedSongIds = albumTracks
-    .map((track) => {
-      const payload = buildTrackPayload(track, {
-        albumUrl,
-        albumTitle,
-        composer,
-        year,
-        updatedAt,
-        existingByPageUrl,
-        existingByTitleKey,
-      });
-      return cleanText(payload.id);
-    })
-    .filter(Boolean);
-  const staleSongIds = (existingRows.results || [])
-    .map((row) => cleanText(row.id))
-    .filter((songId) => songId && !refreshedSongIds.includes(songId));
-  if (staleSongIds.length) {
-    const placeholders = staleSongIds.map(() => "?").join(", ");
-    statements.push(
-      db.prepare(
-        `UPDATE songs SET link_status = 'inactive', updated_at = ? WHERE album_url = ? AND id IN (${placeholders})`,
-      ).bind(updatedAt, albumUrl, ...staleSongIds),
-    );
-  }
-
   statements.push(
-    db.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('updatedAt', ?)").bind(updatedAt),
+    env.DB.prepare("INSERT OR REPLACE INTO app_meta (key, value) VALUES ('updatedAt', ?)").bind(updatedAt),
   );
-  await db.batch(statements);
+  await env.DB.batch(statements);
   return true;
 }
 
@@ -2207,20 +1599,15 @@ function buildTrackPayload(track, context) {
   const downloadLinks = [];
   if (audio320) downloadLinks.push({ label: "320kbps", url: audio320, bitrate: 320 });
   if (audio128) downloadLinks.push({ label: "128kbps", url: audio128, bitrate: 128 });
-  const songPageUrl = cleanText(track.songPageUrl) || context.albumUrl;
-  const existingMatch = resolveExistingAlbumSong(context, {
-    title: cleanText(track.name),
-    songPageUrl,
-  });
   return {
-    id: cleanText(existingMatch?.id) || String(track.id),
+    id: String(track.id),
     album_url: context.albumUrl,
     title: cleanText(track.name) || "Untitled",
     artist: cleanText(track.artists) || "Unknown artist",
     composer: context.composer,
     movie: cleanText(track.m_name) || context.albumTitle,
     year: context.year,
-    song_page_url: songPageUrl,
+    song_page_url: cleanText(track.songPageUrl) || context.albumUrl,
     source_url: context.albumUrl,
     image_url: cleanText(track.img_name)
       ? absoluteUrl(`/uploads/album/${cleanText(track.img_name)}.jpg`, context.albumUrl)
@@ -2236,22 +1623,6 @@ function buildTrackPayload(track, context) {
   };
 }
 
-function songIdentityKey(value) {
-  return cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-
-function resolveExistingAlbumSong(context, track) {
-  const pageUrl = cleanText(track.songPageUrl);
-  if (pageUrl && pageUrl !== context.albumUrl && context.existingByPageUrl?.has(pageUrl)) {
-    return context.existingByPageUrl.get(pageUrl);
-  }
-  const titleKey = songIdentityKey(track.title);
-  if (!titleKey) return null;
-  const matches = context.existingByTitleKey?.get(titleKey) || [];
-  if (matches.length === 1) return matches[0];
-  return null;
-}
-
 function extractBitrateLink(downloadLinks, bitrate) {
   if (!Array.isArray(downloadLinks)) return "";
   for (const item of downloadLinks) {
@@ -2265,24 +1636,19 @@ function extractBitrateLink(downloadLinks, bitrate) {
 async function fetchText(target) {
   if (!target) return "";
   const referer = absoluteUrl(target) || originFromUrl(target);
-  try {
-    const response = await fetch(target, {
-      signal: AbortSignal.timeout(8000),
-      headers: {
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        Referer: referer,
-        Origin: originFromUrl(referer),
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      },
-      redirect: "follow",
-    });
-    if (!response.ok) return "";
-    return response.text();
-  } catch {
-    return "";
-  }
+  const response = await fetch(target, {
+    headers: {
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "en-US,en;q=0.9",
+      Referer: referer,
+      Origin: originFromUrl(referer),
+      "User-Agent":
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    },
+    redirect: "follow",
+  });
+  if (!response.ok) return "";
+  return response.text();
 }
 
 function extractAlbumTracks(html) {

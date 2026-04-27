@@ -15,12 +15,13 @@
     {
       "binding": "DB",
       "database_name": "sruthi-db",
-      "database_id": "TAMIL_D1_ID"
-    },
+      "database_id": "7e7f8f48-5f15-4ac8-bec0-37a899ddb33b"
+    }
+  ],
+  "services": [
     {
-      "binding": "TELUGU_DB",
-      "database_name": "sruthi-telugu-db",
-      "database_id": "TELUGU_D1_ID"
+      "binding": "TELUGU_SERVICE",
+      "service": "sruthi-telugu"
     }
   ]
 }

@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
 
 import argparse
-import certifi
-import hashlib
 import json
 import os
 import random
 import re
 import sys
 import time
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
 
 import cloudscraper
-import requests
 from bs4 import BeautifulSoup
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,56 +32,6 @@ CHALLENGE_MARKERS = (
     "checking your browser",
     "enable javascript and cookies to continue",
 )
-
-# Global rate-limit gate shared across all threads
-REQUEST_GATE_LOCK = threading.Lock()
-REQUEST_GATE_NEXT_ALLOWED_AT = 0.0
-CONSECUTIVE_RATE_LIMITS = 0
-TOTAL_429_COUNT = 0  # monotonic; never reset; used for per-fetch 429 detection
-
-
-class AdaptiveSemaphore:
-    """Semaphore whose concurrency limit can be raised or lowered at runtime."""
-
-    def __init__(self, initial):
-        self._max = initial
-        self._limit = initial
-        self._used = 0
-        self._cond = threading.Condition(threading.Lock())
-
-    def acquire(self):
-        with self._cond:
-            while self._used >= self._limit:
-                self._cond.wait()
-            self._used += 1
-
-    def release(self):
-        with self._cond:
-            self._used = max(0, self._used - 1)
-            self._cond.notify_all()
-
-    def reduce(self, floor=1):
-        with self._cond:
-            self._limit = max(floor, self._limit - 1)
-            return self._limit
-
-    def recover(self):
-        with self._cond:
-            if self._limit < self._max:
-                self._limit += 1
-                self._cond.notify_all()
-            return self._limit
-
-    @property
-    def limit(self):
-        return self._limit
-
-    def __enter__(self):
-        self.acquire()
-        return self
-
-    def __exit__(self, *_):
-        self.release()
 
 
 def default_listing_path(origin):
@@ -116,9 +61,6 @@ def parse_args():
     parser.add_argument("--movie-index-stop-after-known-pages", type=int, default=120)
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--print-summary-only", action="store_true")
-    parser.add_argument("--known-urls-file", default="", help="Optional newline-delimited album URL file for incremental early-stop hinting")
-    parser.add_argument("--failure-threshold", type=float, default=0.5, help="Max fraction of albums allowed to fail before aborting (0–1)")
-    parser.add_argument("--batch-commit-size", type=int, default=32, help="Albums per DB transaction in the write phase")
     return parser.parse_args()
 
 
@@ -130,32 +72,6 @@ def sleep_with_jitter(base_seconds, jitter_seconds=0.25):
     if base_seconds <= 0:
         return
     time.sleep(base_seconds + random.random() * max(jitter_seconds, 0))
-
-
-def wait_for_request_window():
-    while True:
-        with REQUEST_GATE_LOCK:
-            delay_seconds = REQUEST_GATE_NEXT_ALLOWED_AT - time.time()
-        if delay_seconds <= 0:
-            return
-        time.sleep(min(delay_seconds, 5.0))
-
-
-def note_successful_request():
-    global CONSECUTIVE_RATE_LIMITS
-    with REQUEST_GATE_LOCK:
-        CONSECUTIVE_RATE_LIMITS = 0
-
-
-def note_rate_limit(base_delay_seconds):
-    global REQUEST_GATE_NEXT_ALLOWED_AT, CONSECUTIVE_RATE_LIMITS, TOTAL_429_COUNT
-    with REQUEST_GATE_LOCK:
-        CONSECUTIVE_RATE_LIMITS += 1
-        TOTAL_429_COUNT += 1
-        adaptive_delay = base_delay_seconds * max(1, min(CONSECUTIVE_RATE_LIMITS, 8))
-        cooldown_until = time.time() + adaptive_delay + random.uniform(0.5, 2.0)
-        REQUEST_GATE_NEXT_ALLOWED_AT = max(REQUEST_GATE_NEXT_ALLOWED_AT, cooldown_until)
-        return CONSECUTIVE_RATE_LIMITS, max(0.0, REQUEST_GATE_NEXT_ALLOWED_AT - time.time())
 
 
 def is_challenge_page(html):
@@ -302,7 +218,6 @@ def make_session():
             "Upgrade-Insecure-Requests": "1",
         }
     )
-    session.verify = certifi.where()
     return session
 
 
@@ -311,7 +226,6 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
     absolute = to_absolute(url)
     for attempt in range(1, retry_count + 1):
         try:
-            wait_for_request_window()
             response = session.get(absolute, timeout=server.UPSTREAM_PAGE_TIMEOUT_SECONDS)
             response.raise_for_status()
             html = response.text
@@ -331,36 +245,12 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
                     html = fallback_response.read().decode("utf-8", errors="ignore")
                 if is_challenge_page(html):
                     raise RuntimeError(f"Challenge page detected for {absolute}")
-            note_successful_request()
             return html
         except Exception as error:  # noqa: BLE001
             last_error = error
-            status_code = getattr(getattr(error, "response", None), "status_code", None)
-            retry_after_header = ""
-            if getattr(error, "response", None) is not None:
-                retry_after_header = clean_text(error.response.headers.get("Retry-After"))
             if attempt == retry_count:
                 break
-            delay_seconds = retry_base_delay * attempt
-            if status_code == 429:
-                retry_after_seconds = 0
-                if retry_after_header.isdigit():
-                    retry_after_seconds = int(retry_after_header)
-                delay_seconds = max(delay_seconds, retry_after_seconds or (retry_base_delay * (attempt + 2) * 4))
-                consecutive_rate_limits, gate_delay = note_rate_limit(delay_seconds)
-                print(
-                    f"Rate limited on {absolute}; retrying in {delay_seconds:.1f}s "
-                    f"(attempt {attempt}/{retry_count}, consecutive 429s: {consecutive_rate_limits}, "
-                    f"shared cooldown: {gate_delay:.1f}s)",
-                    file=sys.stderr,
-                )
-            elif isinstance(error, requests.HTTPError):
-                print(
-                    f"HTTP {status_code} for {absolute}; retrying in {delay_seconds:.1f}s "
-                    f"(attempt {attempt}/{retry_count})",
-                    file=sys.stderr,
-                )
-            sleep_with_jitter(delay_seconds, min(5.0, max(0.5, delay_seconds * 0.25)))
+            sleep_with_jitter(retry_base_delay * attempt, retry_base_delay * 0.5)
     raise RuntimeError(f"Failed to fetch {absolute}: {last_error}") from last_error
 
 
@@ -640,68 +530,17 @@ def parse_album_page(html, album_seed):
     }
 
 
-def compute_album_hash(parsed):
-    """Stable SHA-256 fingerprint of an album's scrape-visible content.
-
-    Includes fields that meaningfully change when a site editor updates the page:
-    title, year, composer, tracks (id + title + artist + all audio URLs + image).
-    Stable sort ensures the hash is independent of parse ordering.
-    """
-    tracks = sorted(parsed.get("tracks", []), key=lambda t: str(t.get("id", "")))
-    canonical = {
-        "title": clean_text(parsed.get("title")),
-        "year": parsed.get("year"),
-        "musicDirector": clean_text(parsed.get("musicDirector")),
-        "tracks": [
-            {
-                "id": str(t.get("id", "")),
-                "title": clean_text(t.get("title")),
-                "artist": clean_text(t.get("artist")),
-                "audioUrl": clean_text(t.get("audioUrl")),
-                "audio128Url": clean_text(t.get("audio128Url")),
-                "audio320Url": clean_text(t.get("audio320Url")),
-                "imageUrl": clean_text(t.get("imageUrl")),
-            }
-            for t in tracks
-        ],
-    }
-    return hashlib.sha256(
-        json.dumps(canonical, sort_keys=True, ensure_ascii=False).encode()
-    ).hexdigest()
-
-
-def load_known_urls(known_urls_file=""):
-    """Load album URLs that are already in the DB, used only for incremental early-stopping."""
-    known = set()
-    known_file = Path(clean_text(known_urls_file)) if clean_text(known_urls_file) else None
-    if known_file and known_file.exists():
-        known.update(
-            to_absolute(line)
-            for line in known_file.read_text(encoding="utf-8", errors="ignore").splitlines()
-            if clean_text(line)
-        )
-        known = {item for item in known if item}
-
+def load_processed_urls():
     server.ensure_db()
-    known.update(url for url in server.load_processed_urls() if url)
-    return known
+    return set(server.load_processed_urls())
 
 
-def build_album_seeds(session, args, known_urls):
-    """Scrape listing pages and return discovered album seeds.
-
-    In incremental mode, stops after --stop-after-known-pages consecutive pages
-    where every album is already in the DB. In full mode, scans all pages.
-    All discovered albums are returned regardless of DB presence.
-    """
+def build_album_seeds(session, args, processed_urls):
     page = max(1, args.start_page)
     discovered = []
     seen = set()
     total_pages = None
     consecutive_known_pages = 0
-    listing_pages_scanned = 0
-
-    print(f"=== Listing pages scan ({'full' if args.full else 'incremental'}) ===")
 
     while page <= args.max_pages:
         html = fetch_html(session, LISTING_PATH.format(page=page), args.retry_count, args.retry_base_delay)
@@ -709,7 +548,6 @@ def build_album_seeds(session, args, known_urls):
         soup = BeautifulSoup(html, "html.parser")
         page_total = parse_total_pages(soup)
         total_pages = max(total_pages or 1, page_total)
-        listing_pages_scanned += 1
 
         new_on_page = 0
         for seed in seeds:
@@ -717,11 +555,10 @@ def build_album_seeds(session, args, known_urls):
                 continue
             seen.add(seed["url"])
             discovered.append(seed)
-            if seed["url"] not in known_urls:
+            if seed["url"] not in processed_urls:
                 new_on_page += 1
 
-        known_on_page = len(seeds) - new_on_page
-        print(f"  Listing page {page}/{total_pages}: {len(seeds)} albums scanned ({new_on_page} new to DB, {known_on_page} already in DB)")
+        print(f"Listing page {page}: {len(seeds)} albums, {new_on_page} new")
 
         if not args.full:
             if new_on_page == 0:
@@ -729,7 +566,6 @@ def build_album_seeds(session, args, known_urls):
             else:
                 consecutive_known_pages = 0
             if consecutive_known_pages >= max(1, args.stop_after_known_pages):
-                print(f"  Incremental stop: {consecutive_known_pages} consecutive pages with no new albums.")
                 break
 
         if total_pages and page >= total_pages:
@@ -738,49 +574,21 @@ def build_album_seeds(session, args, known_urls):
         page += 1
         sleep_with_jitter(args.page_delay, 0.15)
 
-    print(f"Listing scan done: {listing_pages_scanned} pages, {len(discovered)} albums discovered")
     return unique_by(discovered, lambda item: item["url"]), total_pages or page
 
 
-def build_movie_index_album_seeds(session, args, known_urls):
-    """Scrape movie index and year-wise pages and return discovered album seeds.
-
-    Fetches /movie-index to find year/tag index pages, supplements with explicit
-    year URLs from 1952 to the current year to guarantee full coverage.
-    All discovered albums are returned regardless of DB presence.
-    """
+def build_movie_index_album_seeds(session, args, processed_urls):
     if args.skip_movie_index:
         return []
 
     root_html = fetch_html(session, MOVIE_INDEX_PATH, args.retry_count, args.retry_base_delay)
     entry_paths = parse_movie_index_entry_paths(root_html, include_tag_index=args.include_tag_index)
-
-    # Supplement with explicit year URLs so we never miss a year not linked from index page
-    found_year_paths = {p for p in entry_paths if p and "/browse-by-year/" in p}
-    found_years = set()
-    for p in found_year_paths:
-        m = re.search(r"/browse-by-year/(\d+)", p)
-        if m:
-            found_years.add(int(m.group(1)))
-
-    current_year = datetime.now().year
-    supplemented_years = []
-    for year in range(current_year, 1951, -1):
-        if year not in found_years:
-            year_url = to_absolute(f"/browse-by-year/{year}")
-            entry_paths.append(year_url)
-            supplemented_years.append(year)
-
-    print(f"\n=== Movie index scan ({'full' if args.full else 'incremental'}) ===")
-    print(f"  Index pages found: {len(entry_paths) - len(supplemented_years)} from site, {len(supplemented_years)} year-URLs added ({current_year}→1952)")
-
     discovered = []
     seen_album_urls = set()
     seen_page_urls = set()
     queue = list(entry_paths)
     page_number = 0
     consecutive_known_pages = 0
-    movie_index_pages_scanned = 0
 
     while queue:
         page_url = queue.pop(0)
@@ -789,13 +597,7 @@ def build_movie_index_album_seeds(session, args, known_urls):
         seen_page_urls.add(page_url)
         page_number += 1
 
-        try:
-            html = fetch_html(session, page_url, args.retry_count, args.retry_base_delay)
-        except Exception as err:
-            print(f"  Skipping {page_url}: {err}", file=sys.stderr)
-            continue
-
-        movie_index_pages_scanned += 1
+        html = fetch_html(session, page_url, args.retry_count, args.retry_base_delay)
         seeds = parse_directory_album_seeds(html, page_number=page_number)
         new_on_page = 0
         for seed in seeds:
@@ -803,14 +605,10 @@ def build_movie_index_album_seeds(session, args, known_urls):
                 continue
             seen_album_urls.add(seed["url"])
             discovered.append(seed)
-            if seed["url"] not in known_urls:
+            if seed["url"] not in processed_urls:
                 new_on_page += 1
 
-        year_match = re.search(r"/browse-by-year/(\d+)", page_url)
-        page_label = f"Year {year_match.group(1)}" if year_match else f"Index page {page_number}"
-        known_on_page = len(seeds) - new_on_page
-        if seeds or year_match:
-            print(f"  {page_label}: {len(seeds)} albums ({new_on_page} new, {known_on_page} known)")
+        print(f"Movie index page {page_number}: {len(seeds)} albums, {new_on_page} new")
 
         if new_on_page == 0:
             consecutive_known_pages += 1
@@ -818,7 +616,9 @@ def build_movie_index_album_seeds(session, args, known_urls):
             consecutive_known_pages = 0
 
         if not args.full and consecutive_known_pages >= max(1, args.movie_index_stop_after_known_pages):
-            print(f"  Movie index incremental stop: {consecutive_known_pages} consecutive pages with no new albums.")
+            print(
+                f"Movie index crawl stopped after {consecutive_known_pages} consecutive pages with no new albums."
+            )
             break
 
         for next_page in parse_directory_pagination_paths(html, page_url):
@@ -827,168 +627,35 @@ def build_movie_index_album_seeds(session, args, known_urls):
 
         sleep_with_jitter(args.page_delay, 0.1)
 
-    print(f"Movie index scan done: {movie_index_pages_scanned} pages, {len(discovered)} albums discovered")
     return unique_by(discovered, lambda item: item["url"])
 
 
 def refresh_albums(session, albums, args):
-    """Fetch, parse, and write every discovered album.
-
-    Phase 1 (parallel): Fetch album HTML + parse + compute content hash.
-             Uses AdaptiveSemaphore to reduce concurrency on 429s and recover on clean streaks.
-    Phase 2 (batched): Write all parsed results to SQLite in transactions of --batch-commit-size
-             albums each. Albums whose content_hash matches the stored value are skipped
-             (only last_checked_at is updated); changed or new albums are fully upserted.
-
-    Returns (fetched_count, failed_list, stats_dict).
-    """
-    total = len(albums)
+    updated = 0
     failed = []
-    worker_count = max(1, min(args.workers, 16))
-    start_time = time.time()
 
-    # ── Phase 1: parallel fetch + parse ────────────────────────────────────────
-    print(f"\n=== Phase 1: Fetching {total} album pages ({worker_count} workers) ===")
-
-    concurrency = AdaptiveSemaphore(worker_count)
-    recovery_streak = [0]
-    rl_lock = threading.Lock()
-    parsed_entries: list = []   # (seed, parsed, content_hash) for successes
-    fetch_done = [0]
-    abort_flag = [False]
-
-    def fetch_one(album):
-        if abort_flag[0]:
-            return None
-        rl_before = TOTAL_429_COUNT
-        with concurrency:
-            if abort_flag[0]:
-                return None
-            sleep_with_jitter(args.album_delay, 0.2)
-            html = fetch_html(session, album["url"], args.retry_count, args.retry_base_delay)
-        had_429 = TOTAL_429_COUNT > rl_before
-        with rl_lock:
-            if had_429:
-                recovery_streak[0] = 0
-                new_limit = concurrency.reduce()
-                print(f"  [adaptive] 429 on {album['title']!r}, concurrency → {new_limit}", file=sys.stderr)
-            else:
-                recovery_streak[0] += 1
-                if recovery_streak[0] >= 10 and concurrency.limit < worker_count:
-                    new_limit = concurrency.recover()
-                    recovery_streak[0] = 0
-                    print(f"  [adaptive] Stable, concurrency → {new_limit}", file=sys.stderr)
+    def worker(album):
+        sleep_with_jitter(args.album_delay, 0.2)
+        html = fetch_html(session, album["url"], args.retry_count, args.retry_base_delay)
         parsed = parse_album_page(html, album)
         if not parsed.get("tracks"):
             raise RuntimeError(f"No tracks parsed for {album['url']}")
-        return album, parsed, compute_album_hash(parsed)
+        server.upsert_album_into_db(parsed)
+        return parsed["title"], len(parsed["tracks"])
 
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        futures = {executor.submit(fetch_one, album): album for album in albums}
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
+        futures = {executor.submit(worker, album): album for album in albums}
         for future in as_completed(futures):
             album = futures[future]
-            fetch_done[0] += 1
-            n = fetch_done[0]
             try:
-                result = future.result()
-                if result is None:
-                    continue
-                parsed_entries.append(result)
-                if n % 25 == 0 or n == total:
-                    elapsed = time.time() - start_time
-                    print(f"  [{n}/{total}] fetched  ({elapsed:.0f}s elapsed, {len(failed)} failed)")
+                title, count = future.result()
+                updated += 1
+                print(f"Updated album: {title} ({count} tracks)")
             except Exception as error:  # noqa: BLE001
                 failed.append({"url": album["url"], "title": album["title"], "error": str(error)})
-                print(f"  [{n}/{total}] FAILED fetch: {album['title']} → {error}", file=sys.stderr)
-                if total >= 10 and n >= 20:
-                    fail_rate = len(failed) / n
-                    if fail_rate > args.failure_threshold:
-                        print(
-                            f"Failure rate {fail_rate:.0%} exceeds threshold {args.failure_threshold:.0%} "
-                            f"after {n} albums — stopping fetch phase.",
-                            file=sys.stderr,
-                        )
-                        abort_flag[0] = True
-                        executor.shutdown(wait=False, cancel_futures=True)
-                        break
+                print(f"Failed album: {album['title']} -> {error}", file=sys.stderr)
 
-    fetch_elapsed = time.time() - start_time
-    print(
-        f"Fetch phase done: {len(parsed_entries)} fetched, {len(failed)} failed  "
-        f"({fetch_elapsed:.1f}s, {TOTAL_429_COUNT} total 429s)"
-    )
-
-    if not parsed_entries:
-        return 0, failed, {"unchanged": 0, "albumsInserted": 0, "albumsUpdated": 0,
-                           "tracksInserted": 0, "tracksUpdated": 0, "tracksRemoved": 0}
-
-    # ── Phase 2: batched DB writes ──────────────────────────────────────────────
-    batch_size = max(1, args.batch_commit_size)
-    print(f"\n=== Phase 2: Writing {len(parsed_entries)} albums (batch={batch_size}) ===")
-    write_start = time.time()
-
-    write_stats = server.batch_upsert_albums_into_db(parsed_entries, batch_size=batch_size)
-
-    write_elapsed = time.time() - write_start
-    print(
-        f"Write phase done: {write_stats.get('unchanged', 0)} unchanged, "
-        f"{write_stats.get('albumsInserted', 0)} inserted, "
-        f"{write_stats.get('albumsUpdated', 0)} updated  ({write_elapsed:.1f}s)"
-    )
-
-    return len(parsed_entries), failed, write_stats
-
-
-def validate_db_after_refresh():
-    """Run basic integrity checks on the DB and print results."""
-    import sqlite3
-    db_path = server.DB_PATH
-    if not Path(db_path).exists():
-        print("DB validation skipped: file not found", file=sys.stderr)
-        return False
-
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    try:
-        album_count = conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0]
-        song_count = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
-        dup_albums = conn.execute(
-            "SELECT url FROM albums GROUP BY url HAVING COUNT(*) > 1"
-        ).fetchall()
-        empty_albums = conn.execute(
-            "SELECT COUNT(*) FROM albums WHERE track_count = 0"
-        ).fetchone()[0]
-        no_audio = conn.execute(
-            "SELECT COUNT(*) FROM songs WHERE (audio_url IS NULL OR audio_url = '') "
-            "AND (audio_128_url IS NULL OR audio_128_url = '') "
-            "AND (audio_320_url IS NULL OR audio_320_url = '')"
-        ).fetchone()[0]
-    finally:
-        conn.close()
-
-    issues = []
-    if album_count < 100:
-        issues.append(f"Unexpectedly low album count: {album_count}")
-    if song_count < 500:
-        issues.append(f"Unexpectedly low song count: {song_count}")
-    if dup_albums:
-        issues.append(f"Duplicate album URLs found: {len(dup_albums)}")
-
-    validation = {
-        "albumCount": album_count,
-        "songCount": song_count,
-        "emptyAlbums": empty_albums,
-        "songsWithNoAudio": no_audio,
-        "duplicateAlbumUrls": len(dup_albums),
-        "issues": issues,
-    }
-    print("\n=== DB validation ===")
-    print(json.dumps(validation, indent=2))
-
-    for issue in issues:
-        print(f"WARNING: {issue}", file=sys.stderr)
-
-    return not issues
+    return updated, failed
 
 
 def configure_server_paths():
@@ -1000,8 +667,6 @@ def main():
     global SCRAPE_SITE_ORIGIN
     global LISTING_PATH
     global MOVIE_INDEX_PATH
-
-    run_start = time.time()
 
     args = parse_args()
     SCRAPE_SITE_ORIGIN = clean_text(args.origin).rstrip("/") or server.SITE_ORIGIN
@@ -1020,159 +685,45 @@ def main():
         print(json.dumps(payload.get("summary", {}), indent=2))
         return 0
 
-    mode = "full" if args.full else "incremental"
-    print(json.dumps({
-        "mode": mode,
-        "origin": SCRAPE_SITE_ORIGIN,
-        "workers": args.workers,
-        "batchCommitSize": args.batch_commit_size,
-        "pageDelay": args.page_delay,
-        "albumDelay": args.album_delay,
-    }, indent=2))
-
     session = make_session()
+    processed_urls = load_processed_urls()
+    listing_album_seeds, total_pages = build_album_seeds(session, args, processed_urls)
+    movie_index_album_seeds = build_movie_index_album_seeds(session, args, processed_urls)
+    album_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
+    remaining = album_seeds if args.full else [album for album in album_seeds if album["url"] not in processed_urls]
 
-    # Load known URLs from DB for incremental early-stopping during discovery.
-    # These are NOT used to filter which albums get refreshed — all discovered
-    # albums are always refreshed regardless of whether they exist in the DB.
-    known_urls = load_known_urls(args.known_urls_file)
-
-    listing_album_seeds, total_pages = build_album_seeds(session, args, known_urls)
-    movie_index_album_seeds = build_movie_index_album_seeds(session, args, known_urls)
-
-    # Merge and deduplicate — never fetch the same detail page twice in one run
-    listing_only = len(listing_album_seeds)
-    movie_index_only = len(movie_index_album_seeds)
-    all_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
-    deduped_total = len(all_seeds)
-    duplicates_removed = (listing_only + movie_index_only) - deduped_total
-
-    # All discovered albums are refreshed — no filtering by DB presence.
-    # Hash check inside batch_upsert_albums_into_db() determines whether a full
-    # rewrite is needed; presence in DB alone never causes a skip.
-    remaining = all_seeds
-
-    print(json.dumps(
-        {
-            "origin": SCRAPE_SITE_ORIGIN,
-            "mode": mode,
-            "listingPagesSeen": total_pages,
-            "listingDiscoveredAlbums": listing_only,
-            "movieIndexDiscoveredAlbums": movie_index_only,
-            "duplicatesRemoved": duplicates_removed,
-            "totalAlbumsToRefresh": deduped_total,
-            "knownUrlsInDb": len(known_urls),
-        },
-        indent=2,
-    ))
+    print(
+        json.dumps(
+            {
+                "origin": SCRAPE_SITE_ORIGIN,
+                "listingPath": LISTING_PATH,
+                "listingPagesSeen": total_pages,
+                "listingDiscoveredAlbums": len(listing_album_seeds),
+                "movieIndexDiscoveredAlbums": len(movie_index_album_seeds),
+                "discoveredAlbums": len(album_seeds),
+                "knownAlbums": len(processed_urls),
+                "albumsToRefresh": len(remaining),
+                "fullRefresh": bool(args.full),
+            },
+            indent=2,
+        )
+    )
 
     if not remaining:
         server.write_runtime_catalog_files_from_db()
         return 0
 
-    fetched, failed, stats = refresh_albums(session, remaining, args)
-
-    # Save failure report
-    if failed:
-        report_path = Path("data/failed_albums.json")
-        report_path.write_text(json.dumps(failed, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"\nFailed albums report: {report_path} ({len(failed)} entries)", file=sys.stderr)
-
+    updated, failed = refresh_albums(session, remaining, args)
     payload = server.write_runtime_catalog_files_from_db()
-    validate_db_after_refresh()
-
-    total_runtime_s = time.time() - run_start
-    runtime_str = f"{int(total_runtime_s // 60)}m {int(total_runtime_s % 60)}s"
-
-    # Active/inactive song counts from DB
-    import sqlite3 as _sqlite3
-    try:
-        _conn = _sqlite3.connect(str(server.DB_PATH))
-        active_songs = _conn.execute("SELECT COUNT(*) FROM songs WHERE link_status != 'inactive'").fetchone()[0]
-        inactive_songs = _conn.execute("SELECT COUNT(*) FROM songs WHERE link_status = 'inactive'").fetchone()[0]
-        _conn.close()
-    except Exception:
-        active_songs = inactive_songs = "?"
-
     summary = {
-        "mode": mode,
-        # Discovery
-        "discoveredAlbumURLs": listing_only + movie_index_only,
-        "deduplicatedURLs": deduped_total,
-        "duplicatesRemoved": duplicates_removed,
-        # Fetch phase
-        "detailPagesFetched": fetched,
-        "failedURLs": len(failed),
-        "total429s": TOTAL_429_COUNT,
-        # Write phase (hash-based)
-        "unchangedAlbums": stats.get("unchanged", 0),
-        "insertedAlbums": stats.get("albumsInserted", 0),
-        "updatedAlbums": stats.get("albumsUpdated", 0),
-        # Tracks
-        "activeSongs": active_songs,
-        "inactiveSongs": inactive_songs,
-        "tracksInserted": stats.get("tracksInserted", 0),
-        "tracksUpdated": stats.get("tracksUpdated", 0),
-        "tracksMarkedInactive": stats.get("tracksRemoved", 0),
-        # Catalog totals
-        "totalAlbumCount": payload.get("summary", {}).get("albumCount", 0),
-        "totalTrackCount": payload.get("summary", {}).get("trackCount", 0),
-        # Runtime
-        "totalRuntime": runtime_str,
-        "totalRuntimeSeconds": round(total_runtime_s, 1),
+        "updatedAlbums": updated,
+        "failedAlbums": len(failed),
+        "albumCount": payload.get("summary", {}).get("albumCount", 0),
+        "trackCount": payload.get("summary", {}).get("trackCount", 0),
     }
-    print("\n=== Final summary ===")
     print(json.dumps(summary, indent=2))
 
-    print("\n=== How runtime is reduced ===")
-    print(
-        "  • Hash skip: albums whose scrape-visible content (title, year, composer, track titles/URLs/artwork)\n"
-        "    is unchanged are detected via SHA-256 in a single bulk DB read; only last_checked_at is updated —\n"
-        f"    {stats.get('unchanged', 0)} albums skipped full rewrite this run.\n"
-        "  • Transaction batching: all writes inside one SQLite transaction per batch of "
-        f"{args.batch_commit_size} albums —\n"
-        "    ~{} commits instead of one per album.\n".format(
-            max(1, (fetched + len(failed)) // args.batch_commit_size)
-        ) +
-        "  • Incremental discovery (non-full mode): listing pages stop after consecutive known-only pages;\n"
-        "    movie index does the same — far fewer detail pages to fetch than a full catalog scan.\n"
-        "  • Adaptive concurrency: 429 responses reduce the semaphore limit; 10+ clean fetches recover it —\n"
-        f"    {TOTAL_429_COUNT} 429s triggered adaptive throttle this run."
-    )
-
-    print("\n=== How correctness is preserved ===")
-    print(
-        "  • Every discovered album URL is always fetched — hash check is only used to skip DB writes,\n"
-        "    never to skip the HTTP fetch. Changed content is always detected.\n"
-        "  • COALESCE(NULLIF(new,''), old) on all audio/image URL columns prevents overwriting a working\n"
-        "    URL with an empty string when the scrape doesn't find one.\n"
-        "  • Stale tracks are marked link_status='inactive' (not deleted) — existing favourites/queues\n"
-        "    remain playable; inactive songs are hidden from catalog listings only.\n"
-        "  • Blue/green D1: this script writes only to local SQLite; the live Cloudflare D1 is never\n"
-        "    touched during refresh. D1 validation gates block deployment of broken catalogs."
-    )
-
-    print("\n=== Commands ===")
-    base = "python tools/masstamilan_refresh.py"
-    fast_cmd = (
-        f"{base} "
-        "--workers 4 --batch-commit-size 32 "
-        "--page-delay 1.0 --album-delay 0.8 "
-        "--retry-count 5 --retry-base-delay 3 "
-        "--stop-after-known-pages 2 --movie-index-stop-after-known-pages 120 "
-        "--failure-threshold 0.5"
-    )
-    full_cmd = (
-        f"{base} --full "
-        "--workers 4 --batch-commit-size 32 "
-        "--page-delay 1.0 --album-delay 0.8 "
-        "--retry-count 5 --retry-base-delay 3 "
-        "--failure-threshold 0.5"
-    )
-    print(f"  Fast scheduled refresh:\n    {fast_cmd}")
-    print(f"  Complete full refresh:\n    {full_cmd}")
-
-    if failed and fetched == 0:
+    if failed and updated == 0:
         raise SystemExit("All album refreshes failed.")
     return 0
 
