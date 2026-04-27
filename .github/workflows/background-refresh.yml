@@ -254,13 +254,15 @@ jobs:
       - name: Refresh catalog from MassTamilan
         run: |
           set -euo pipefail
-          workers="$(python - <<'PY'
-          import os
-          print(max(4, os.cpu_count() or 4))
-          PY
-          )"
-          batch_size="$(( workers * 4 ))"
-          args=(--workers "${workers}" --batch-size "${batch_size}")
+          args=(
+            --workers 4
+            --batch-size 16
+            --page-delay 1.0
+            --album-delay 0.8
+            --retry-count 5
+            --retry-base-delay 3
+            --failure-threshold 0.5
+          )
           if [[ "${SRUTHI_FULL_REFRESH}" == "true" ]]; then
             args+=(--full)
           fi

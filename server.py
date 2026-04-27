@@ -1283,10 +1283,13 @@ def upsert_album_into_db(album_payload, db_path=None):
 
     with get_sqlite_connection(target_db) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
+        album_existed = connection.execute("SELECT 1 FROM albums WHERE url = ?", (album_url,)).fetchone() is not None
         existing_rows, existing_by_page_url, existing_by_title_key = build_existing_album_song_maps(connection, album_url)
         existing_song_ids = {clean_text(row["id"]) for row in existing_rows if clean_text(row["id"])}
         refreshed_song_ids = []
         adjusted_songs_payload = []
+        tracks_inserted = 0
+        tracks_updated = 0
         for song in songs_payload:
             payload = dict(song)
             payload["songPageUrl"] = clean_text(payload.get("songPageUrl") or payload.get("sourceUrl"))
@@ -1294,6 +1297,9 @@ def upsert_album_into_db(album_payload, db_path=None):
             existing_match = resolve_existing_album_song(album_url, existing_by_page_url, existing_by_title_key, payload)
             if existing_match is not None:
                 payload["id"] = clean_text(existing_match["id"]) or payload.get("id")
+                tracks_updated += 1
+            else:
+                tracks_inserted += 1
             adjusted_songs_payload.append(payload)
             if clean_text(payload.get("id")):
                 refreshed_song_ids.append(clean_text(payload.get("id")))
@@ -1443,7 +1449,13 @@ def upsert_album_into_db(album_payload, db_path=None):
         )
 
     SONG_RECORD_CACHE.clear()
-    return True
+    return {
+        "ok": True,
+        "albumInserted": not album_existed,
+        "tracksInserted": tracks_inserted,
+        "tracksUpdated": tracks_updated,
+        "tracksRemoved": len(stale_song_ids),
+    }
 
 
 def library_song_sort_key(song):

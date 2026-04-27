@@ -1,0 +1,143 @@
+name: Deploy Worker
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: Deploy Workers (no catalog refresh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      SRUTHI_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_ACTIVE_D1_SLOT }}
+      SRUTHI_D1_DB_A_ID: ${{ vars.SRUTHI_D1_DB_A_ID }}
+      SRUTHI_D1_DB_A_NAME: ${{ vars.SRUTHI_D1_DB_A_NAME }}
+      SRUTHI_D1_DB_B_ID: ${{ vars.SRUTHI_D1_DB_B_ID }}
+      SRUTHI_D1_DB_B_NAME: ${{ vars.SRUTHI_D1_DB_B_NAME }}
+      SRUTHI_TELUGU_ACTIVE_D1_SLOT: ${{ vars.SRUTHI_TELUGU_ACTIVE_D1_SLOT }}
+      SRUTHI_TELUGU_D1_DB_A_ID: ${{ vars.SRUTHI_TELUGU_D1_DB_A_ID }}
+      SRUTHI_TELUGU_D1_DB_A_NAME: ${{ vars.SRUTHI_TELUGU_D1_DB_A_NAME }}
+      SRUTHI_TELUGU_D1_DB_B_ID: ${{ vars.SRUTHI_TELUGU_D1_DB_B_ID }}
+      SRUTHI_TELUGU_D1_DB_B_NAME: ${{ vars.SRUTHI_TELUGU_D1_DB_B_NAME }}
+      WRANGLER_SEND_METRICS: "false"
+      MAIN_CONFIG: cloudflare/.generated/wrangler.deploy.main.jsonc
+      TELUGU_CONFIG: cloudflare/.generated/wrangler.deploy.telugu.jsonc
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install wrangler
+        run: npm install --global wrangler@4.81.1
+
+      - name: Verify Cloudflare token
+        run: |
+          set -euo pipefail
+          if ! npx wrangler whoami >/tmp/wrangler-whoami.txt 2>/tmp/wrangler-whoami.err; then
+            echo "::error::Wrangler authentication failed."
+            cat /tmp/wrangler-whoami.err
+            exit 1
+          fi
+
+      - name: Resolve active D1 slots
+        run: |
+          set -euo pipefail
+
+          tamil_active="${SRUTHI_ACTIVE_D1_SLOT:-A}"
+          if [[ "$tamil_active" == "B" ]]; then
+            echo "TAMIL_DB_ID=${SRUTHI_D1_DB_B_ID}" >> "$GITHUB_ENV"
+            echo "TAMIL_DB_NAME=${SRUTHI_D1_DB_B_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "TAMIL_DB_ID=${SRUTHI_D1_DB_A_ID}" >> "$GITHUB_ENV"
+            echo "TAMIL_DB_NAME=${SRUTHI_D1_DB_A_NAME}" >> "$GITHUB_ENV"
+          fi
+
+          telugu_active="${SRUTHI_TELUGU_ACTIVE_D1_SLOT:-A}"
+          if [[ "$telugu_active" == "B" ]]; then
+            echo "TELUGU_DB_ID=${SRUTHI_TELUGU_D1_DB_B_ID:-}" >> "$GITHUB_ENV"
+            echo "TELUGU_DB_NAME=${SRUTHI_TELUGU_D1_DB_B_NAME:-}" >> "$GITHUB_ENV"
+          else
+            echo "TELUGU_DB_ID=${SRUTHI_TELUGU_D1_DB_A_ID:-}" >> "$GITHUB_ENV"
+            echo "TELUGU_DB_NAME=${SRUTHI_TELUGU_D1_DB_A_NAME:-}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Render main worker config
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "${MAIN_CONFIG}")"
+
+          telugu_args=()
+          if [[ -n "${TELUGU_DB_ID:-}" ]]; then
+            telugu_args+=(--telugu-database-id "${TELUGU_DB_ID}")
+          fi
+          if [[ -n "${TELUGU_DB_NAME:-}" ]]; then
+            telugu_args+=(--telugu-database-name "${TELUGU_DB_NAME}")
+          fi
+
+          python cloudflare/scripts/render_wrangler_config.py \
+            --input cloudflare/wrangler.jsonc \
+            --output "${MAIN_CONFIG}" \
+            --database-id "${TAMIL_DB_ID}" \
+            --database-name "${TAMIL_DB_NAME}" \
+            --account-id "${CLOUDFLARE_ACCOUNT_ID}" \
+            "${telugu_args[@]}"
+
+      - name: Deploy main worker (sruthi)
+        run: |
+          set -euo pipefail
+          retry() {
+            local attempts="$1"; shift; local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then return 1; fi
+              sleep $(( attempt * 10 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler deploy --config "${MAIN_CONFIG}"
+
+      - name: Render Telugu worker config
+        if: ${{ env.TELUGU_DB_ID != '' }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "${TELUGU_CONFIG}")"
+          python cloudflare/scripts/render_wrangler_config.py \
+            --input cloudflare/wrangler.telugu.jsonc \
+            --output "${TELUGU_CONFIG}" \
+            --database-id "${TELUGU_DB_ID}" \
+            --database-name "${TELUGU_DB_NAME}" \
+            --account-id "${CLOUDFLARE_ACCOUNT_ID}"
+
+      - name: Deploy Telugu worker (sruthi-telugu)
+        if: ${{ env.TELUGU_DB_ID != '' }}
+        run: |
+          set -euo pipefail
+          retry() {
+            local attempts="$1"; shift; local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then return 1; fi
+              sleep $(( attempt * 10 ))
+              attempt=$(( attempt + 1 ))
+            done
+          }
+          retry 3 npx wrangler deploy --config "${TELUGU_CONFIG}"

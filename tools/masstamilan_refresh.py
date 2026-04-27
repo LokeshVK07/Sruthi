@@ -9,6 +9,7 @@ import sys
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 from urllib.parse import urljoin, urlparse
@@ -35,6 +36,7 @@ CHALLENGE_MARKERS = (
     "enable javascript and cookies to continue",
 )
 
+# Global rate-limit gate shared across all threads
 REQUEST_GATE_LOCK = threading.Lock()
 REQUEST_GATE_NEXT_ALLOWED_AT = 0.0
 CONSECUTIVE_RATE_LIMITS = 0
@@ -67,7 +69,8 @@ def parse_args():
     parser.add_argument("--movie-index-stop-after-known-pages", type=int, default=120)
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--print-summary-only", action="store_true")
-    parser.add_argument("--known-urls-file", default="", help="Optional newline-delimited album URL file used for incremental stopping")
+    parser.add_argument("--known-urls-file", default="", help="Optional newline-delimited album URL file for incremental early-stop hinting")
+    parser.add_argument("--failure-threshold", type=float, default=0.5, help="Max fraction of albums allowed to fail before aborting (0–1)")
     return parser.parse_args()
 
 
@@ -100,8 +103,8 @@ def note_rate_limit(base_delay_seconds):
     global REQUEST_GATE_NEXT_ALLOWED_AT, CONSECUTIVE_RATE_LIMITS
     with REQUEST_GATE_LOCK:
         CONSECUTIVE_RATE_LIMITS += 1
-        adaptive_delay = base_delay_seconds * max(1, min(CONSECUTIVE_RATE_LIMITS, 6))
-        cooldown_until = time.time() + adaptive_delay + random.uniform(0.2, 1.2)
+        adaptive_delay = base_delay_seconds * max(1, min(CONSECUTIVE_RATE_LIMITS, 8))
+        cooldown_until = time.time() + adaptive_delay + random.uniform(0.5, 2.0)
         REQUEST_GATE_NEXT_ALLOWED_AT = max(REQUEST_GATE_NEXT_ALLOWED_AT, cooldown_until)
         return CONSECUTIVE_RATE_LIMITS, max(0.0, REQUEST_GATE_NEXT_ALLOWED_AT - time.time())
 
@@ -296,13 +299,14 @@ def fetch_html(session, url, retry_count=3, retry_base_delay=1.0):
                 delay_seconds = max(delay_seconds, retry_after_seconds or (retry_base_delay * (attempt + 2) * 4))
                 consecutive_rate_limits, gate_delay = note_rate_limit(delay_seconds)
                 print(
-                    f"Rate limited while fetching {absolute}; retrying in {delay_seconds:.1f}s "
-                    f"(attempt {attempt}/{retry_count}, consecutive 429s: {consecutive_rate_limits}, shared cooldown: {gate_delay:.1f}s)",
+                    f"Rate limited on {absolute}; retrying in {delay_seconds:.1f}s "
+                    f"(attempt {attempt}/{retry_count}, consecutive 429s: {consecutive_rate_limits}, "
+                    f"shared cooldown: {gate_delay:.1f}s)",
                     file=sys.stderr,
                 )
             elif isinstance(error, requests.HTTPError):
                 print(
-                    f"Fetch failed for {absolute} with HTTP {status_code}; retrying in {delay_seconds:.1f}s "
+                    f"HTTP {status_code} for {absolute}; retrying in {delay_seconds:.1f}s "
                     f"(attempt {attempt}/{retry_count})",
                     file=sys.stderr,
                 )
@@ -586,29 +590,38 @@ def parse_album_page(html, album_seed):
     }
 
 
-def load_processed_urls(known_urls_file=""):
-    processed = set()
+def load_known_urls(known_urls_file=""):
+    """Load album URLs that are already in the DB, used only for incremental early-stopping."""
+    known = set()
     known_file = Path(clean_text(known_urls_file)) if clean_text(known_urls_file) else None
     if known_file and known_file.exists():
-        processed.update(
+        known.update(
             to_absolute(line)
             for line in known_file.read_text(encoding="utf-8", errors="ignore").splitlines()
             if clean_text(line)
         )
-        processed = {item for item in processed if item}
+        known = {item for item in known if item}
 
     server.ensure_db()
-    processed.update(server.load_processed_urls())
-    return processed
+    known.update(url for url in server.load_processed_urls() if url)
+    return known
 
 
+def build_album_seeds(session, args, known_urls):
+    """Scrape listing pages and return discovered album seeds.
 
-def build_album_seeds(session, args, processed_urls):
+    In incremental mode, stops after --stop-after-known-pages consecutive pages
+    where every album is already in the DB. In full mode, scans all pages.
+    All discovered albums are returned regardless of DB presence.
+    """
     page = max(1, args.start_page)
     discovered = []
     seen = set()
     total_pages = None
     consecutive_known_pages = 0
+    listing_pages_scanned = 0
+
+    print(f"=== Listing pages scan ({'full' if args.full else 'incremental'}) ===")
 
     while page <= args.max_pages:
         html = fetch_html(session, LISTING_PATH.format(page=page), args.retry_count, args.retry_base_delay)
@@ -616,6 +629,7 @@ def build_album_seeds(session, args, processed_urls):
         soup = BeautifulSoup(html, "html.parser")
         page_total = parse_total_pages(soup)
         total_pages = max(total_pages or 1, page_total)
+        listing_pages_scanned += 1
 
         new_on_page = 0
         for seed in seeds:
@@ -623,10 +637,11 @@ def build_album_seeds(session, args, processed_urls):
                 continue
             seen.add(seed["url"])
             discovered.append(seed)
-            if seed["url"] not in processed_urls:
+            if seed["url"] not in known_urls:
                 new_on_page += 1
 
-        print(f"Listing page {page}: {len(seeds)} albums, {new_on_page} new")
+        known_on_page = len(seeds) - new_on_page
+        print(f"  Listing page {page}/{total_pages}: {len(seeds)} albums scanned ({new_on_page} new to DB, {known_on_page} already in DB)")
 
         if not args.full:
             if new_on_page == 0:
@@ -634,6 +649,7 @@ def build_album_seeds(session, args, processed_urls):
             else:
                 consecutive_known_pages = 0
             if consecutive_known_pages >= max(1, args.stop_after_known_pages):
+                print(f"  Incremental stop: {consecutive_known_pages} consecutive pages with no new albums.")
                 break
 
         if total_pages and page >= total_pages:
@@ -642,21 +658,49 @@ def build_album_seeds(session, args, processed_urls):
         page += 1
         sleep_with_jitter(args.page_delay, 0.15)
 
+    print(f"Listing scan done: {listing_pages_scanned} pages, {len(discovered)} albums discovered")
     return unique_by(discovered, lambda item: item["url"]), total_pages or page
 
 
-def build_movie_index_album_seeds(session, args, processed_urls):
+def build_movie_index_album_seeds(session, args, known_urls):
+    """Scrape movie index and year-wise pages and return discovered album seeds.
+
+    Fetches /movie-index to find year/tag index pages, supplements with explicit
+    year URLs from 1952 to the current year to guarantee full coverage.
+    All discovered albums are returned regardless of DB presence.
+    """
     if args.skip_movie_index:
         return []
 
     root_html = fetch_html(session, MOVIE_INDEX_PATH, args.retry_count, args.retry_base_delay)
     entry_paths = parse_movie_index_entry_paths(root_html, include_tag_index=args.include_tag_index)
+
+    # Supplement with explicit year URLs so we never miss a year not linked from index page
+    found_year_paths = {p for p in entry_paths if p and "/browse-by-year/" in p}
+    found_years = set()
+    for p in found_year_paths:
+        m = re.search(r"/browse-by-year/(\d+)", p)
+        if m:
+            found_years.add(int(m.group(1)))
+
+    current_year = datetime.now().year
+    supplemented_years = []
+    for year in range(current_year, 1951, -1):
+        if year not in found_years:
+            year_url = to_absolute(f"/browse-by-year/{year}")
+            entry_paths.append(year_url)
+            supplemented_years.append(year)
+
+    print(f"\n=== Movie index scan ({'full' if args.full else 'incremental'}) ===")
+    print(f"  Index pages found: {len(entry_paths) - len(supplemented_years)} from site, {len(supplemented_years)} year-URLs added ({current_year}→1952)")
+
     discovered = []
     seen_album_urls = set()
     seen_page_urls = set()
     queue = list(entry_paths)
     page_number = 0
     consecutive_known_pages = 0
+    movie_index_pages_scanned = 0
 
     while queue:
         page_url = queue.pop(0)
@@ -665,7 +709,13 @@ def build_movie_index_album_seeds(session, args, processed_urls):
         seen_page_urls.add(page_url)
         page_number += 1
 
-        html = fetch_html(session, page_url, args.retry_count, args.retry_base_delay)
+        try:
+            html = fetch_html(session, page_url, args.retry_count, args.retry_base_delay)
+        except Exception as err:
+            print(f"  Skipping {page_url}: {err}", file=sys.stderr)
+            continue
+
+        movie_index_pages_scanned += 1
         seeds = parse_directory_album_seeds(html, page_number=page_number)
         new_on_page = 0
         for seed in seeds:
@@ -673,10 +723,14 @@ def build_movie_index_album_seeds(session, args, processed_urls):
                 continue
             seen_album_urls.add(seed["url"])
             discovered.append(seed)
-            if seed["url"] not in processed_urls:
+            if seed["url"] not in known_urls:
                 new_on_page += 1
 
-        print(f"Movie index page {page_number}: {len(seeds)} albums, {new_on_page} new")
+        year_match = re.search(r"/browse-by-year/(\d+)", page_url)
+        page_label = f"Year {year_match.group(1)}" if year_match else f"Index page {page_number}"
+        known_on_page = len(seeds) - new_on_page
+        if seeds or year_match:
+            print(f"  {page_label}: {len(seeds)} albums ({new_on_page} new, {known_on_page} known)")
 
         if new_on_page == 0:
             consecutive_known_pages += 1
@@ -684,9 +738,7 @@ def build_movie_index_album_seeds(session, args, processed_urls):
             consecutive_known_pages = 0
 
         if not args.full and consecutive_known_pages >= max(1, args.movie_index_stop_after_known_pages):
-            print(
-                f"Movie index crawl stopped after {consecutive_known_pages} consecutive pages with no new albums."
-            )
+            print(f"  Movie index incremental stop: {consecutive_known_pages} consecutive pages with no new albums.")
             break
 
         for next_page in parse_directory_pagination_paths(html, page_url):
@@ -695,13 +747,22 @@ def build_movie_index_album_seeds(session, args, processed_urls):
 
         sleep_with_jitter(args.page_delay, 0.1)
 
+    print(f"Movie index scan done: {movie_index_pages_scanned} pages, {len(discovered)} albums discovered")
     return unique_by(discovered, lambda item: item["url"])
 
 
 def refresh_albums(session, albums, args):
+    """Fetch and upsert every discovered album. Returns (updated_count, failed_list, stats)."""
+    total = len(albums)
     updated = 0
     failed = []
-    worker_count = max(1, min(args.workers, 4))
+    worker_count = max(1, min(args.workers, 16))
+    tracks_inserted_total = 0
+    tracks_updated_total = 0
+    tracks_removed_total = 0
+    albums_inserted_total = 0
+
+    print(f"\n=== Refreshing {total} albums with {worker_count} workers ===")
 
     def worker(album):
         sleep_with_jitter(args.album_delay, 0.2)
@@ -709,22 +770,108 @@ def refresh_albums(session, albums, args):
         parsed = parse_album_page(html, album)
         if not parsed.get("tracks"):
             raise RuntimeError(f"No tracks parsed for {album['url']}")
-        server.upsert_album_into_db(parsed)
-        return parsed["title"], len(parsed["tracks"])
+        upsert_result = server.upsert_album_into_db(parsed)
+        return parsed["title"], len(parsed["tracks"]), upsert_result
 
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {executor.submit(worker, album): album for album in albums}
+        done_count = 0
         for future in as_completed(futures):
             album = futures[future]
+            done_count += 1
             try:
-                title, count = future.result()
+                title, track_count, result = future.result()
                 updated += 1
-                print(f"Updated album: {title} ({count} tracks)")
+                ins = result.get("tracksInserted", 0)
+                upd = result.get("tracksUpdated", 0)
+                rem = result.get("tracksRemoved", 0)
+                is_new_album = result.get("albumInserted", False)
+                tracks_inserted_total += ins
+                tracks_updated_total += upd
+                tracks_removed_total += rem
+                if is_new_album:
+                    albums_inserted_total += 1
+                action = "Inserted" if is_new_album else "Updated"
+                print(
+                    f"  [{done_count}/{total}] {action}: {title} "
+                    f"({track_count} tracks: +{ins} new, ~{upd} updated, -{rem} removed)"
+                )
             except Exception as error:  # noqa: BLE001
                 failed.append({"url": album["url"], "title": album["title"], "error": str(error)})
-                print(f"Failed album: {album['title']} -> {error}", file=sys.stderr)
+                print(f"  [{done_count}/{total}] FAILED: {album['title']} → {error}", file=sys.stderr)
 
-    return updated, failed
+                # Check failure threshold mid-run
+                if total >= 10:
+                    current_fail_rate = len(failed) / done_count
+                    if current_fail_rate > args.failure_threshold and done_count >= 20:
+                        print(
+                            f"Failure rate {current_fail_rate:.0%} exceeds threshold {args.failure_threshold:.0%} "
+                            f"after {done_count} albums. Stopping.",
+                            file=sys.stderr,
+                        )
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+
+    stats = {
+        "albumsInserted": albums_inserted_total,
+        "albumsUpdated": updated - albums_inserted_total,
+        "tracksInserted": tracks_inserted_total,
+        "tracksUpdated": tracks_updated_total,
+        "tracksRemoved": tracks_removed_total,
+    }
+    return updated, failed, stats
+
+
+def validate_db_after_refresh():
+    """Run basic integrity checks on the DB and print results."""
+    import sqlite3
+    db_path = server.DB_PATH
+    if not Path(db_path).exists():
+        print("DB validation skipped: file not found", file=sys.stderr)
+        return False
+
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    try:
+        album_count = conn.execute("SELECT COUNT(*) FROM albums").fetchone()[0]
+        song_count = conn.execute("SELECT COUNT(*) FROM songs").fetchone()[0]
+        dup_albums = conn.execute(
+            "SELECT url FROM albums GROUP BY url HAVING COUNT(*) > 1"
+        ).fetchall()
+        empty_albums = conn.execute(
+            "SELECT COUNT(*) FROM albums WHERE track_count = 0"
+        ).fetchone()[0]
+        no_audio = conn.execute(
+            "SELECT COUNT(*) FROM songs WHERE (audio_url IS NULL OR audio_url = '') "
+            "AND (audio_128_url IS NULL OR audio_128_url = '') "
+            "AND (audio_320_url IS NULL OR audio_320_url = '')"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    issues = []
+    if album_count < 100:
+        issues.append(f"Unexpectedly low album count: {album_count}")
+    if song_count < 500:
+        issues.append(f"Unexpectedly low song count: {song_count}")
+    if dup_albums:
+        issues.append(f"Duplicate album URLs found: {len(dup_albums)}")
+
+    validation = {
+        "albumCount": album_count,
+        "songCount": song_count,
+        "emptyAlbums": empty_albums,
+        "songsWithNoAudio": no_audio,
+        "duplicateAlbumUrls": len(dup_albums),
+        "issues": issues,
+    }
+    print("\n=== DB validation ===")
+    print(json.dumps(validation, indent=2))
+
+    for issue in issues:
+        print(f"WARNING: {issue}", file=sys.stderr)
+
+    return not issues
 
 
 def configure_server_paths():
@@ -754,43 +901,78 @@ def main():
         print(json.dumps(payload.get("summary", {}), indent=2))
         return 0
 
+    mode = "full" if args.full else "incremental"
+    print(json.dumps({
+        "mode": mode,
+        "origin": SCRAPE_SITE_ORIGIN,
+        "workers": args.workers,
+        "pageDelay": args.page_delay,
+        "albumDelay": args.album_delay,
+    }, indent=2))
+
     session = make_session()
-    processed_urls = load_processed_urls(args.known_urls_file)
 
-    listing_album_seeds, total_pages = build_album_seeds(session, args, processed_urls)
-    movie_index_album_seeds = build_movie_index_album_seeds(session, args, processed_urls)
-    album_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
-    remaining = album_seeds if args.full else [album for album in album_seeds if album["url"] not in processed_urls]
+    # Load known URLs from DB for incremental early-stopping during discovery.
+    # These are NOT used to filter which albums get refreshed — all discovered
+    # albums are always refreshed regardless of whether they exist in the DB.
+    known_urls = load_known_urls(args.known_urls_file)
 
-    print(
-        json.dumps(
-            {
-                "origin": SCRAPE_SITE_ORIGIN,
-                "listingPath": LISTING_PATH,
-                "listingPagesSeen": total_pages,
-                "listingDiscoveredAlbums": len(listing_album_seeds),
-                "movieIndexDiscoveredAlbums": len(movie_index_album_seeds),
-                "discoveredAlbums": len(album_seeds),
-                "knownAlbums": len(processed_urls),
-                "albumsToRefresh": len(remaining),
-                "fullRefresh": bool(args.full),
-            },
-            indent=2,
-        )
-    )
+    listing_album_seeds, total_pages = build_album_seeds(session, args, known_urls)
+    movie_index_album_seeds = build_movie_index_album_seeds(session, args, known_urls)
+
+    # Merge sources, deduplicate by URL
+    all_seeds = unique_by(listing_album_seeds + movie_index_album_seeds, lambda item: item["url"])
+    listing_only = len(listing_album_seeds)
+    movie_index_only = len(movie_index_album_seeds)
+    deduped_total = len(all_seeds)
+    duplicates_removed = (listing_only + movie_index_only) - deduped_total
+
+    # All discovered albums are refreshed — no filtering by DB presence.
+    # This ensures every album gets its metadata, tracks, and URLs updated.
+    remaining = all_seeds
+
+    print(json.dumps(
+        {
+            "origin": SCRAPE_SITE_ORIGIN,
+            "mode": mode,
+            "listingPagesSeen": total_pages,
+            "listingDiscoveredAlbums": listing_only,
+            "movieIndexDiscoveredAlbums": movie_index_only,
+            "duplicatesRemoved": duplicates_removed,
+            "totalAlbumsToRefresh": deduped_total,
+            "knownUrlsInDb": len(known_urls),
+        },
+        indent=2,
+    ))
 
     if not remaining:
         server.write_runtime_catalog_files_from_db()
         return 0
 
-    updated, failed = refresh_albums(session, remaining, args)
+    updated, failed, stats = refresh_albums(session, remaining, args)
+
+    # Save failure report
+    if failed:
+        report_path = Path("data/failed_albums.json")
+        report_path.write_text(json.dumps(failed, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"\nFailed albums report: {report_path} ({len(failed)} entries)", file=sys.stderr)
+
     payload = server.write_runtime_catalog_files_from_db()
+    validate_db_after_refresh()
+
     summary = {
-        "updatedAlbums": updated,
-        "failedAlbums": len(failed),
-        "albumCount": payload.get("summary", {}).get("albumCount", 0),
-        "trackCount": payload.get("summary", {}).get("trackCount", 0),
+        "mode": mode,
+        "albumsRefreshed": updated,
+        "albumsInserted": stats.get("albumsInserted", 0),
+        "albumsUpdated": stats.get("albumsUpdated", 0),
+        "albumsFailed": len(failed),
+        "tracksInserted": stats.get("tracksInserted", 0),
+        "tracksUpdated": stats.get("tracksUpdated", 0),
+        "tracksRemoved": stats.get("tracksRemoved", 0),
+        "totalAlbumCount": payload.get("summary", {}).get("albumCount", 0),
+        "totalTrackCount": payload.get("summary", {}).get("trackCount", 0),
     }
+    print("\n=== Final summary ===")
     print(json.dumps(summary, indent=2))
 
     if failed and updated == 0:
